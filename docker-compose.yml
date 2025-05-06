@@ -1,0 +1,54 @@
+
+services:
+  whatsapp-bot:
+    build: .
+    container_name: whatsapp-bot
+    restart: unless-stopped
+    ports:
+      - "3000:3000"  # Optional API or healthcheck port
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/usr/src/app/downloads
+      - ./auth:/usr/src/app/auth
+      - ./backups:/usr/src/app/backups
+    depends_on:
+      - mongo
+      - chromadb
+      - embeddings
+
+  mongo:
+    image: mongo:6
+    container_name: mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/db:/data/db
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=http://localhost:3000
+    volumes:
+      - ./data/chroma:/chroma
+
+  embeddings:
+    build:
+      context: ./embedding-service
+    container_name: embeddings
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./embedding-service:/app
+    working_dir: /app
+    command: ["python", "main.py"]
+    environment:
+      - TRANSFORMERS_CACHE=/app/cache
+    depends_on:
+      - mongo
