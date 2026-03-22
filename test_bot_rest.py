@@ -46,7 +46,7 @@ def get_recent_messages():
 
 def download_latest_media(after_iso_date, output_file):
     try:
-        url = f"{BASE_URL}/media?after={after_iso_date}"
+        url = f"{BASE_URL}/api/get-media?after={after_iso_date}"
         response = requests.get(url, headers=HEADERS, stream=True)
         if response.status_code == 200:
             with open(output_file, 'wb') as f:

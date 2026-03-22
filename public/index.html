@@ -1,0 +1,72 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WhatsApp MCP</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; }
+    h2 { border-bottom: 1px solid #ccc; padding-bottom: .5rem; }
+    input, textarea { width: 100%; margin: .5rem 0; padding: .5rem; }
+    button { padding: .5rem 1rem; }
+    .log { background: #f5f5f5; padding: 1rem; margin-top: 1rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>📲 WhatsApp Bot Control Panel</h1>
+
+  <h2>Health Check</h2>
+  <button onclick="checkHealth()">Check</button>
+  <div id="health-status" class="log"></div>
+
+  <h2>Send Message</h2>
+  <input type="text" id="send-to" placeholder="Phone (e.g. 123456789@s.whatsapp.net)" />
+  <textarea id="send-text" placeholder="Your message here..."></textarea>
+  <button onclick="sendMessage()">Send</button>
+  <div id="send-status" class="log"></div>
+
+  <h2>Send Media</h2>
+  <input type="text" id="media-number" placeholder="Phone (e.g. 123456789@s.whatsapp.net)" />
+  <input type="file" id="media-file" />
+  <button onclick="sendMedia()">Upload</button>
+  <div id="media-status" class="log"></div>
+
+  <script>
+    async function checkHealth() {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      document.getElementById('health-status').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function sendMessage() {
+      const to = document.getElementById('send-to').value;
+      const message = document.getElementById('send-text').value;
+
+      const res = await fetch('/api/send-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to, message })
+      });
+
+      const data = await res.json();
+      document.getElementById('send-status').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function sendMedia() {
+      const number = document.getElementById('media-number').value;
+      const fileInput = document.getElementById('media-file');
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      formData.append('number', number);
+
+      const res = await fetch('/api/send-media', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json();
+      document.getElementById('media-status').textContent = JSON.stringify(data, null, 2);
+    }
+  </script>
+</body>
+</html>

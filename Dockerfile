@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 3000
 
 # Set the default command to start the bot
-CMD ["node", "bot.js"]
+CMD ["node", "server.js"]
