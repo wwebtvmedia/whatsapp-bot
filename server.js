@@ -23,7 +23,7 @@ const authFolder = process.env.WHATSAPP_AUTH_PATH;
 const serverPort = process.env.SERVER_PORT;
 const embeddingUrl = process.env.EMBEDDING_URL;
 const autoReplyEnabled = process.env.AUTO_REPLY === 'true';
-const apiToken = process.env.API_TOKEN || 'my-strong-secret-token';
+const apiToken = process.env.API_TOKEN;
 
 [downloadsPath, authFolder].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

@@ -1,8 +1,12 @@
 import requests
+import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_URL = "http://localhost:3000"
-API_TOKEN = "my-strong-secret-token"  # same as in your .env
+API_TOKEN = os.getenv("API_TOKEN")  # Read from .env
 
 HEADERS = {
     "x-api-token": API_TOKEN,

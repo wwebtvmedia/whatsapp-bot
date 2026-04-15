@@ -49,7 +49,7 @@ AUTO_REPLY=true
 WHATSAPP_AUTH_PATH=./auth
 DOWNLOADS_PATH=./downloads
 SERVER_PORT=3000
-API_TOKEN=your-secret-token
+API_TOKEN=YOUR_SECRET_TOKEN_HERE
 ```
 
 ### 🧠 LLM Setup (Llama.cpp)
@@ -82,7 +82,7 @@ podman logs -f whatsapp-bot
 
 ## 🔌 API Endpoints
 
-All API requests (except `/api/health`) require the header `x-api-token: your-secret-token`.
+All API requests (except `/api/health`) require the header `x-api-token: YOUR_SECRET_TOKEN_HERE`.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
