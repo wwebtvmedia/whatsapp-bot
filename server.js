@@ -22,6 +22,7 @@ const downloadsPath = process.env.DOWNLOADS_PATH;
 const authFolder = process.env.WHATSAPP_AUTH_PATH;
 const serverPort = process.env.SERVER_PORT;
 const embeddingUrl = process.env.EMBEDDING_URL;
+const autoReplyEnabled = process.env.AUTO_REPLY === 'true';
 const apiToken = process.env.API_TOKEN || 'my-strong-secret-token';
 
 [downloadsPath, authFolder].forEach(dir => {
@@ -38,7 +39,7 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
   for (const msg of messages) {
     const jid = msg.key.remoteJid;
     const isGroup = jid.endsWith('@g.us');
-    if (!msg.message || isGroup || jid.endsWith('@bot')) continue;
+    if (!msg.message || isGroup || jid.endsWith('@bot') || msg.key.fromMe) continue;
 
     const messageId = msg.key.id;
     const timestamp = msg.messageTimestamp;
@@ -70,7 +71,7 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
       console.error('❌ Embedding failed:', err.message);
     }
 
-    await saveMessage({ 
+    const savedId = await saveMessage({ 
       jid, 
       messageContent, 
       timestamp, 
@@ -82,6 +83,18 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
 
     if (embedding) {
       await insertIntoChroma(messageId, messageContent, embedding, { from: jid });
+    }
+
+    // Auto reply if enabled
+    if (autoReplyEnabled && messageContent && messageContent !== 'No text') {
+        try {
+            const replyText = await generateAutoReply(messageContent, chromaCollection);
+            await sock.sendMessage(jid, { text: replyText });
+            await updateRepliedStatus(savedId);
+            console.log(`🤖 Auto-replied to ${jid}`);
+        } catch (err) {
+            console.error('❌ Auto-reply failed:', err.message);
+        }
     }
 
     await tryDownloadMedia(msg, downloadsPath, sock.logger, sock.updateMediaMessage);
