@@ -7,9 +7,11 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 
-import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, insertIntoChroma } from './storage/database.js';
+import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
 import { generateAutoReply } from './answerGenerator.js';
+import { classifyMessage } from './classifier.js';
+import { searchMemory, embedText } from './memorySearch.js';
 
 dotenv.config();
 
@@ -30,7 +32,7 @@ const apiToken = process.env.API_TOKEN;
 });
 
 // Mongo & Chroma setup
-const { messageCollection, chromaCollection } = await initDatabase(mongoUrl, chromaUrl);
+await initDatabase(mongoUrl, chromaUrl);
 
 // WhatsApp setup
 await startWhatsApp(authFolder, async ({ messages, type }) => {
@@ -57,39 +59,75 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     const fileName = `${messageId}.${extension}`;
     const filePath = path.join(senderFolder, fileName);
 
+    // Classify first (zero-cost): subject, info type and entities for the graph
+    const { subject, infoType, entities } = classifyMessage(messageContent !== 'No text' ? messageContent : '');
+    const day = dayKey(new Date(Number(timestamp) * 1000));
+
+    const savedId = await saveMessage({
+      jid,
+      messageContent,
+      timestamp,
+      messageId,
+      messageType,
+      subject,
+      infoType,
+      entities,
+      media: isMedia ? { filePath, fileName } : null
+    });
+
+    const ref = savedId.toString();
+
+    // Graph edges, built purely from metadata (no LLM calls)
+    await upsertGraphEdge({ from: jid, edge: 'sent', to: subject, ref });
+    const mentioned = [
+      ...(entities?.phones || []),
+      ...(entities?.emails || []),
+      ...(entities?.urls || [])
+    ];
+    for (const target of new Set(mentioned)) {
+      await upsertGraphEdge({ from: jid, edge: 'mentions', to: target, ref });
+    }
+
+    // Two-level vector index: the message itself + its per-day digest
     let embedding = null;
     try {
-      const response = await fetch(embeddingUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: [messageContent] })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        embedding = data.embeddings?.[0];
-      }
+      embedding = await embedText(messageContent !== 'No text' ? messageContent : `[media] ${messageType}`);
     } catch (err) {
       console.error('❌ Embedding failed:', err.message);
     }
 
-    const savedId = await saveMessage({ 
-      jid, 
-      messageContent, 
-      timestamp, 
-      messageId, 
-      messageType,
-      media: isMedia ? { filePath, fileName } : null,
-      embedding
-    });
-
     if (embedding) {
-      await insertIntoChroma(messageId, messageContent, embedding, { from: jid });
+      await upsertChromaMessage(messageId, messageContent, embedding, {
+        sender: jid, subject, info_type: infoType, day, ref
+      });
+
+      // Coarse level: refresh the day-digest embedding periodically
+      const digest = await upsertDailyDigest({
+        key: `${jid}|${day}`,
+        sender: jid,
+        day,
+        subject,
+        text: `${messageType === 'text' ? '' : `[${messageType}] `}${messageContent}`
+      });
+      const embedEvery = Math.max(1, parseInt(process.env.DIGEST_EMBED_EVERY || '5', 10));
+      if (digest && digest.count % embedEvery === 1) {
+        try {
+          const digestText = (digest.texts || []).slice(-40).join('\n');
+          const digestEmbedding = await embedText(digestText);
+          await upsertChromaDay(`day:${jid}:${day}`, digestText, digestEmbedding, {
+            sender: jid, day, subjects: digest.subjects || [subject]
+          });
+        } catch (err) {
+          console.error('❌ Digest embedding failed:', err.message);
+        }
+      }
     }
 
     // Auto reply if enabled
     if (autoReplyEnabled && messageContent && messageContent !== 'No text') {
         try {
-            const replyText = await generateAutoReply(messageContent, chromaCollection);
+            const { context } = await searchMemory(messageContent, { sender: jid });
+            const replyText = await generateAutoReply(messageContent, context);
             await getSocket().sendMessage(jid, { text: replyText });
             await updateRepliedStatus(savedId);
             console.log(`🤖 Auto-replied to ${jid}`);
@@ -171,23 +209,23 @@ app.get('/api/get-media', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/query-memory', authMiddleware, async (req, res) => {
-  const { text } = req.body;
+  const { text, sender } = req.body;
   if (!text) return res.status(400).json({ error: 'Missing "text" field' });
 
   try {
-    // Embed the query with the same model used at ingestion, then search by vectors
-    const response = await fetch(embeddingUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: [text], type: 'query' })
-    });
-    if (!response.ok) throw new Error(`Embedding service error (${response.status})`);
-    const { embeddings } = await response.json();
-
-    const results = await chromaCollection.query({ queryEmbeddings: embeddings, nResults: 5 });
-    res.json({ query: text, matches: results.documents?.[0] || [] });
+    const result = await searchMemory(text, { sender: sender || null });
+    res.json({ query: text, ...result });
   } catch (err) {
     res.status(500).json({ error: 'Failed to query memory', details: err.message });
+  }
+});
+
+app.get('/api/graph', authMiddleware, async (req, res) => {
+  try {
+    const maxEdges = parseInt(req.query.maxEdges || '300', 10);
+    res.json(await getGraph(Number.isFinite(maxEdges) ? Math.min(Math.max(maxEdges, 1), 1000) : 300));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build graph', details: err.message });
   }
 });
 
@@ -200,7 +238,7 @@ app.post('/api/trigger-reply', authMiddleware, async (req, res) => {
   for (const from of fromList) {
     const messages = await getUnrepliedMessages(from);
     for (const msg of messages) {
-      const replyText = await generateAutoReply(msg.messageContent, chromaCollection);
+      const replyText = await generateAutoReply(msg.messageContent);
       await sock.sendMessage(msg.sender, { text: replyText });
       await updateRepliedStatus(msg._id);
       totalReplied++;

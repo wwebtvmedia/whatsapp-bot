@@ -1,24 +1,13 @@
 // answerGenerator.js
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import { searchMemory } from './memorySearch.js';
 
 dotenv.config();
 
 const llmUrl = process.env.LLM_URL || "http://localhost:11434/api/chat";
 const llmModel = process.env.LLM_MODEL || "qwen2:7b";
 const llmType = process.env.LLM_TYPE || "ollama"; // 'ollama' or 'openai' (for llama.cpp)
-const embeddingUrl = process.env.EMBEDDING_URL || "http://localhost:8001/embed";
-
-async function embedQuery(text) {
-  const response = await fetch(embeddingUrl, {
-    method: 'POST',
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input: [text], type: 'query' })
-  });
-  if (!response.ok) throw new Error(`Embedding service error (${response.status})`);
-  const data = await response.json();
-  return data.embeddings?.[0];
-}
 
 export async function queryLLM(context, query) {
   const systemPrompt = "You are a helpful assistant. Use the following context to answer the user's question. Context:\n" + context;
@@ -80,17 +69,15 @@ export async function queryLLM(context, query) {
   }
 }
 
-export async function generateAutoReply(inputText, chromaCollection) {
+// `context` may carry an already-computed memory context (hierarchical search);
+// when absent, run the full retrieval pipeline here.
+export async function generateAutoReply(inputText, context = '') {
   try {
-    // Query with embeddings from the same model used for ingestion,
-    // not ChromaDB's built-in default (a different, English-only model)
-    const queryEmbedding = await embedQuery(inputText);
-    const results = await chromaCollection.query({
-      queryEmbeddings: [queryEmbedding],
-      nResults: 3
-    });
-
-    const memoryContext = (results.documents?.[0] || []).join('\n');
+    let memoryContext = context;
+    if (!memoryContext) {
+      const result = await searchMemory(inputText);
+      memoryContext = result.context;
+    }
     return await queryLLM(memoryContext, inputText);
   } catch (err) {
     console.error('❌ Failed to generate auto reply:', err);
