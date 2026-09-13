@@ -95,7 +95,40 @@
     }
     .chip.type { background: transparent; border: 1px solid var(--line); color: var(--muted); }
     .chip.doc { background: var(--amber-soft); color: var(--amber); }
+    .chip.warn { background: var(--amber-soft); color: var(--amber); }
+    .chip.err { background: #F7E3DF; color: #B3402E; }
     .card-dead { grid-column: 2; }
+
+    /* --- Proposed replies (drafted, not sent) --- */
+    .proposal {
+      background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--amber);
+      border-radius: 0 8px 8px 0; padding: .6rem .8rem; margin-bottom: .5rem;
+    }
+    .proposal .p-head { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; font-size: .85rem; }
+    .proposal .p-head .sender { font-family: var(--mono); font-size: .82rem; font-weight: 600; }
+    .proposal .p-head time { font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+    .proposal .p-head button { margin-left: auto; font-size: .8rem; padding: .2rem .7rem; }
+    .proposal .p-in { color: var(--muted); font-size: .85rem; margin: .3rem 0 .15rem; overflow-wrap: anywhere; }
+    .proposal .p-reply { font-size: .92rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+    /* --- Per-contact auto-reply --- */
+    .section-hint { font-size: .82rem; color: var(--muted); margin: 0 0 .6rem; }
+    .contact-row {
+      display: flex; gap: .6rem; align-items: center; padding: .4rem 0;
+      border-bottom: 1px dashed var(--line); font-size: .9rem;
+    }
+    .contact-row .c-sender { font-family: var(--mono); font-size: .82rem; font-weight: 600; overflow-wrap: anywhere; }
+    .contact-row .c-meta { margin-left: auto; font-family: var(--mono); font-size: .75rem; color: var(--muted); white-space: nowrap; }
+    .contact-row label { font-size: .78rem; color: var(--muted); display: flex; gap: .3rem; align-items: center; }
+
+    /* --- Bot activity log --- */
+    .logline {
+      font-family: var(--mono); font-size: .78rem; padding: .12rem 0;
+      border-bottom: 1px dashed var(--line); overflow-wrap: anywhere;
+    }
+    .logline.warn { color: var(--amber); }
+    .logline.error { color: #B3402E; }
+    .logline .l-time { color: var(--muted); margin-right: .4rem; }
 
     /* --- Daily summaries --- */
     .digests { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .7rem; }
@@ -151,6 +184,17 @@
   </section>
 
   <section>
+    <h2>Proposed replies <span id="proposals-count" class="chip type"></span></h2>
+    <div id="proposals" class="empty">Loading…</div>
+  </section>
+
+  <section>
+    <h2>Auto-reply per contact</h2>
+    <p class="section-hint">Off for everyone by default: the bot drafts a reply for review instead of sending it. Tick a contact to let the bot answer automatically.</p>
+    <div id="contacts" class="empty">Loading…</div>
+  </section>
+
+  <section>
     <h2>Ask the memory</h2>
     <div class="toolbar">
       <input type="text" id="ask-text" placeholder="e.g. what is the amount on the invoice I received?" onkeydown="if(event.key==='Enter')askMemory()" />
@@ -198,6 +242,11 @@
     <div id="health-status" class="log" hidden></div>
   </section>
 
+  <section>
+    <h2>Bot log</h2>
+    <div id="botlog" class="empty">Loading…</div>
+  </section>
+
   <script>
     // Protected endpoints require the x-api-token header; ask once per session.
     let apiToken = sessionStorage.getItem('apiToken') || prompt('Enter API token:');
@@ -217,6 +266,7 @@
 
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const timeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+    const logTimeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
     const localDayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     function dayLabel(d) {
@@ -246,20 +296,36 @@
 
     // --- Journal: everything received, grouped by day ---
     const journal = { messages: [], digests: [] };
+    // Panel state: auto-reply toggles, drafted replies, bot activity log
+    const panel = { contacts: [], proposals: [], logs: [] };
+    // True while a toggle/send is in flight: the refresh must not re-render
+    // those sections, or the control the user just clicked disappears
+    let contactsBusy = false;
+    let proposalsBusy = false;
 
     async function loadJournal() {
       const el = document.getElementById('journal');
       const dEl = document.getElementById('digests');
       try {
-        const [msgRes, digRes] = await Promise.all([
+        const [msgRes, digRes, conRes, propRes, logRes] = await Promise.all([
           fetchAuth('/api/get-messages?limit=100'),
-          fetchAuth('/api/digests?limit=50')
+          fetchAuth('/api/digests?limit=50'),
+          fetchAuth('/api/contacts'),
+          fetchAuth('/api/proposed-replies?limit=50'),
+          fetchAuth('/api/logs?limit=150')
         ]);
         if (!msgRes.ok || !digRes.ok) throw new Error('HTTP ' + msgRes.status);
         journal.messages = await msgRes.json();
         journal.digests = await digRes.json();
+        // Each new section degrades on its own if its endpoint fails
+        panel.contacts = conRes.ok ? await conRes.json() : [];
+        panel.proposals = propRes.ok ? await propRes.json() : [];
+        panel.logs = logRes.ok ? await logRes.json() : [];
         renderJournal();
         renderDigests();
+        if (!contactsBusy) renderContacts();
+        if (!proposalsBusy) renderProposals();
+        renderLogs();
         checkHealth(true);
       } catch (err) {
         el.className = 'empty';
@@ -286,6 +352,7 @@
         return;
       }
       el.className = '';
+      const proposalByRef = new Map(panel.proposals.map(p => [p.messageRef, p]));
       let html = '';
       let lastDay = '';
       for (const m of items) {
@@ -295,13 +362,15 @@
           lastDay = dayKey;
           html += `<div class="day-sep">${esc(dayLabel(d))}</div>`;
         }
+        const proposal = proposalByRef.get(m._id);
         const chips = [
           m.subject ? `<span class="chip">${esc(m.subject)}</span>` : '',
           m.infoType ? `<span class="chip type">${esc(m.infoType)}</span>` : '',
           m.media?.fileName ? `<span class="chip doc">📎 ${esc(m.media.fileName)}</span>` : '',
-          m.media?.indexedChunks > 0 ? `<span class="chip doc">📄 ${m.media.indexedChunks} chunks indexed</span>` : ''
+          m.media?.indexedChunks > 0 ? `<span class="chip doc">📄 ${m.media.indexedChunks} chunks indexed</span>` : '',
+          proposal && proposal.status !== 'sent' ? '<span class="chip warn">✎ reply proposed</span>' : ''
         ].filter(Boolean).join(' ');
-        const ticks = m.replied ? '<span class="ticks" title="AI replied">✓✓</span>' : '';
+        const ticks = (m.replied || proposal?.status === 'sent') ? '<span class="ticks" title="AI replied">✓✓</span>' : '';
         html += `<div class="entry">
           <time>${esc(timeFmt.format(d))}</time>
           <div class="who"><span class="sender">${esc(m.sender)}</span>${ticks}${chips}</div>
@@ -329,6 +398,102 @@
           <div class="d-preview">${esc(preview.length > 140 ? preview.slice(0, 140) + '…' : preview)}</div>
           <div class="chips">${subjects}</div>
         </div>`;
+      }).join('');
+    }
+
+    // --- Proposed replies: drafted by the bot, sent only on demand ---
+    function renderProposals() {
+      const el = document.getElementById('proposals');
+      const count = document.getElementById('proposals-count');
+      const pending = panel.proposals.filter(p => p.status === 'proposed').length;
+      count.textContent = panel.proposals.length ? `${pending} pending / ${panel.proposals.length}` : '';
+      if (!panel.proposals.length) {
+        el.className = 'empty';
+        el.textContent = 'Draft replies appear here when a contact writes while auto-reply is off.';
+        return;
+      }
+      el.className = '';
+      el.innerHTML = panel.proposals.map(p => {
+        const d = new Date(p.createdAt);
+        const chip = p.status === 'sent' ? '<span class="chip">sent</span>'
+          : p.status === 'failed' ? `<span class="chip err" title="${esc(p.error || 'send failed')}">failed</span>`
+          : '<span class="chip warn">proposed</span>';
+        const btn = p.status === 'proposed' ? `<button onclick="sendProposal('${p._id}')">Send</button>` : '';
+        return `<div class="proposal">
+          <div class="p-head"><time>${esc(timeFmt.format(d))}</time><span class="sender">${esc(p.sender)}</span>${chip}${btn}</div>
+          <div class="p-in">↩ ${esc(p.incoming)}</div>
+          <div class="p-reply">${esc(p.reply)}</div>
+        </div>`;
+      }).join('');
+    }
+
+    // --- Per-contact auto-reply toggle ---
+    function renderContacts() {
+      const el = document.getElementById('contacts');
+      if (!panel.contacts.length) {
+        el.className = 'empty';
+        el.textContent = 'Contacts appear here once someone writes to the bot.';
+        return;
+      }
+      el.className = '';
+      el.innerHTML = panel.contacts.map(c => {
+        const arg = esc(c.sender); // JIDs are quote-free, safe inside the handler string
+        return `<div class="contact-row">
+          <input type="checkbox" ${c.autoReply ? 'checked' : ''} onchange="toggleAutoReply('${arg}', this.checked)" />
+          <span class="c-sender">${esc(c.sender)}</span>
+          <span class="c-meta">${c.total ?? '?'} msg · ${c.unreplied ?? 0} unreplied</span>
+        </div>`;
+      }).join('');
+    }
+
+    async function toggleAutoReply(sender, enabled) {
+      contactsBusy = true;
+      try {
+        const res = await fetchAuth('/api/contacts/auto-reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sender, enabled })
+        });
+        if (res.ok) {
+          const doc = await res.json();
+          const row = panel.contacts.find(c => c.sender === sender);
+          if (row) row.autoReply = !!doc.autoReply;
+        }
+        renderContacts();
+      } finally {
+        contactsBusy = false;
+      }
+    }
+
+    async function sendProposal(id) {
+      proposalsBusy = true;
+      try {
+        const res = await fetchAuth(`/api/proposed-replies/${id}/send`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        const p = panel.proposals.find(x => x._id === id);
+        if (res.ok && p) p.status = 'sent';
+        if (res.status === 502 && p) { p.status = 'failed'; p.error = data.details || 'send failed'; }
+        renderProposals();
+        // Fresh journal ticks, counts and bot log once the send settled
+        loadJournal();
+      } finally {
+        proposalsBusy = false;
+      }
+    }
+
+    // --- Bot activity log ---
+    function renderLogs() {
+      const el = document.getElementById('botlog');
+      if (!panel.logs.length) {
+        el.className = 'empty';
+        el.textContent = 'No activity yet — events appear here as the bot processes messages.';
+        return;
+      }
+      el.className = '';
+      el.innerHTML = panel.logs.map(l => {
+        const d = new Date(l.createdAt);
+        const details = Object.entries(l.details || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
+        return `<div class="logline ${esc(l.level)}"><span class="l-time">${esc(logTimeFmt.format(d))}</span>${esc(l.level)} · ${esc(l.event)}${details ? ' — ' + esc(details) : ''}</div>`;
       }).join('');
     }
 

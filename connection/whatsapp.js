@@ -4,6 +4,7 @@ import qrcode from 'qrcode-terminal';
 import path from 'path';
 import fs from 'fs';
 import { useMultiFileAuthState, fetchLatestBaileysVersion, makeWASocket, downloadMediaMessage, DisconnectReason } from '@whiskeysockets/baileys';
+import { saveLog } from '../storage/database.js';
 
 let sock = null;
 
@@ -25,9 +26,20 @@ export async function startWhatsApp(authFolder, onMessage) {
   });
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) qrcode.generate(qr, { small: true });
+    if (qr) {
+      qrcode.generate(qr, { small: true });
+      saveLog('wa.qr');
+    }
+    if (connection === 'open') {
+      saveLog('wa.connected', { user: sock.user?.id });
+    }
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      saveLog('wa.disconnected', {
+        level: shouldReconnect ? 'warn' : 'error',
+        reconnecting: shouldReconnect,
+        code: lastDisconnect?.error?.output?.statusCode
+      });
       if (shouldReconnect) startWhatsApp(authFolder, onMessage);
     }
   });

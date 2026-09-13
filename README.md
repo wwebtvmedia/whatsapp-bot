@@ -9,6 +9,7 @@ A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB.
 - **📄 Document Understanding:** Received PDFs, Word files and text documents are extracted, chunked and indexed into the vector memory; images are OCR'd (tesseract, on by default). Ask questions about their content in plain language.
 - **Semantic Memory (GraphRAG):** Uses **ChromaDB** and a custom **Python Embedding Service** (multilingual E5 by default, configurable via `EMBEDDING_MODEL`) with hierarchical retrieval: coarse per-day digests → fine-grained messages/document chunks, plus a lexical fallback and a contact/topic **graph** (`/api/graph`).
 - **AI-Powered Replies:** Generates automated or manual replies using **Ollama** or **Llama.cpp** via an OpenAI-compatible API.
+- **Replies under control:** Auto-reply is **off for every contact by default** and toggled per contact from the web panel. With it off, the bot still drafts every reply and keeps it as a *proposed reply* — review and send it with one click. Every bot event lands in a persistent activity log shown in the panel.
 - **📧 Email Ingestion (optional):** With `MAIL_ENABLED=true`, inbound emails land in the same memory as WhatsApp messages (IMAP listener with auto-reconnect), and `POST /api/send-email` sends mail via SMTP.
 - **Database:** Uses **MongoDB** for persistent message and metadata storage.
 - **REST API:** Control the bot, send messages/media/emails, and query memory via a built-in Express server.
@@ -46,7 +47,6 @@ EMBEDDING_URL=http://embeddings:8001/embed
 LLM_URL=http://llamacpp:8080/v1/chat/completions
 LLM_MODEL=model
 LLM_TYPE=openai
-AUTO_REPLY=true
 
 WHATSAPP_AUTH_PATH=./auth
 DOWNLOADS_PATH=./downloads
@@ -119,7 +119,14 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | `GET` | `/api/get-media` | Download the most recent media file (optional `?after=<ISO date>`). |
 | `POST` | `/api/query-memory` | Semantic search through message history **and received documents** (PDF/docx/text are extracted and indexed; images via optional OCR — `MEDIA_OCR_ENABLED`). |
 | `GET` | `/api/graph` | Contact/topic/mention graph built from message metadata (`?maxEdges=300`). |
-| `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs. |
+| `GET` | `/api/digests` | Per-contact daily summaries (coarse memory level). |
+| `POST` | `/api/ask` | Question → retrieval + LLM answer, **without sending anything** (same pipeline as replies). |
+| `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs (respects the per-contact toggle; body `"force": true` overrides it). |
+| `GET` | `/api/contacts` | Known contacts with their auto-reply flag and activity counters. |
+| `POST` | `/api/contacts/auto-reply` | Toggle auto-reply per contact: `{"sender": "<jid>", "enabled": true|false}`. |
+| `GET` | `/api/proposed-replies` | Replies drafted by the bot and awaiting review (`?limit=25`). |
+| `POST` | `/api/proposed-replies/:id/send` | Send a proposed reply to its contact. |
+| `GET` | `/api/logs` | Bot activity log (receptions, proposed/sent replies, connections, errors — `?limit=100`). |
 
 ---
 
@@ -127,7 +134,7 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 
 Send any document (PDF, `.docx`, text file) or image to the bot. It is downloaded, its text is extracted (OCR for images), chunked and indexed. Then just ask:
 
-- **On WhatsApp** (with `AUTO_REPLY=true`), in the same conversation:
+- **On WhatsApp** (if auto-reply is enabled for that contact in the panel — off by default), in the same conversation:
   > *"quel est le montant de la facture ?"*
 - **Through the API:**
 
@@ -158,6 +165,9 @@ db.messages.find().sort({ timestamp: -1 }).limit(5)   // latest messages
 db.messages.find({ "media.indexedChunks": { $gt: 0 } }) // indexed documents (media.extractedText = preview)
 db.daily_digests.find()       // per-contact daily summaries
 db.graph_edges.find().sort({ weight: -1 }).limit(10)
+db.contact_settings.find()    // per-contact auto-reply toggles
+db.proposed_replies.find()    // replies drafted but not sent (panel review)
+db.bot_logs.find()            // bot activity log (auto-pruned after 7 days)
 ```
 
 **MongoDB Compass** also works on `mongodb://localhost:27017` (the port is bound to `127.0.0.1` only).

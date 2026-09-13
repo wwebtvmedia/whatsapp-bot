@@ -5,6 +5,9 @@ import { ChromaClient } from 'chromadb';
 let messageCollection;
 let digestCollection;   // conversation digests (hierarchical coarse level)
 let graphCollection;    // lightweight edge store powering /api/graph
+let contactSettingsCollection; // per-contact auto-reply toggle (panel-driven)
+let proposedReplyCollection;   // LLM replies kept for review instead of being sent
+let logCollection;      // bot activity log, readable from the panel
 let chromaMessages;     // fine-grained level: every message
 let chromaDays;         // coarse level: one embedding per sender+day
 
@@ -23,6 +26,21 @@ export async function initDatabase(mongoUrl, chromaUrl, dbName = 'mcp', collecti
     graphCollection = db.collection('graph_edges');
     await digestCollection.createIndex({ key: 1 }, { unique: true });
     await graphCollection.createIndex({ from: 1, edge: 1, to: 1 }, { unique: true });
+    // Serves the contacts aggregation and getUnrepliedMessages
+    await messageCollection.createIndex({ sender: 1, timestamp: -1 });
+
+    contactSettingsCollection = db.collection('contact_settings');
+    await contactSettingsCollection.createIndex({ sender: 1 }, { unique: true });
+
+    proposedReplyCollection = db.collection('proposed_replies');
+    // One proposal per incoming message; unique index + $setOnInsert keeps
+    // Baileys' replayed upserts from duplicating or regressing a sent row
+    await proposedReplyCollection.createIndex({ messageRef: 1 }, { unique: true });
+    await proposedReplyCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
+
+    logCollection = db.collection('bot_logs');
+    // TTL index also serves the createdAt-descending reads
+    await logCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 3600 });
     console.log('✅ Connected to MongoDB');
 
     // ChromaDB setup — two levels for hierarchical retrieval
@@ -36,6 +54,13 @@ export async function initDatabase(mongoUrl, chromaUrl, dbName = 'mcp', collecti
     console.error('❌ Failed to initialize databases:', err);
     throw err;
   }
+}
+
+// Driver <5 wraps findOneAndUpdate results in {value, lastErrorObject, ok};
+// newer drivers return the document directly. Normalize to doc-or-null.
+function unwrapFindOneAndUpdate(result) {
+  if (result && typeof result === 'object' && 'value' in result) return result.value;
+  return result ?? null;
 }
 
 // Chroma metadata must be flat scalars — arrays are joined, values truncated
@@ -331,6 +356,177 @@ export async function getUnrepliedMessages(sender, limit = 10) {
     return await messageCollection.find({ sender, replied: false }).limit(limit).toArray();
   } catch (err) {
     console.error('❌ Failed to get unreplied messages:', err);
+    return [];
+  }
+}
+
+// --- Per-contact auto-reply settings (default: off, toggled from the panel) ---
+
+export async function getContactSettings(sender) {
+  try {
+    if (!contactSettingsCollection) throw new Error("MongoDB not initialized");
+    const doc = await contactSettingsCollection.findOne({ sender });
+    // Default synthesized: a contact never toggled must not be auto-replied to
+    return doc || { sender, autoReply: false };
+  } catch (err) {
+    console.error(`❌ Failed to get contact settings for ${sender}:`, err.message);
+    return { sender, autoReply: false };
+  }
+}
+
+export async function setContactAutoReply(sender, enabled) {
+  if (!contactSettingsCollection) throw new Error("MongoDB not initialized");
+  const result = await contactSettingsCollection.findOneAndUpdate(
+    { sender },
+    {
+      $set: { autoReply: !!enabled, updatedAt: new Date() },
+      $setOnInsert: { sender, createdAt: new Date() }
+    },
+    { upsert: true, returnDocument: 'after' }
+  );
+  return unwrapFindOneAndUpdate(result);
+}
+
+// Contacts known from received messages, merged with their auto-reply setting
+export async function getContactsWithActivity(limit = 200) {
+  try {
+    if (!messageCollection || !contactSettingsCollection) throw new Error("MongoDB not initialized");
+    const activity = await messageCollection.aggregate([
+      { $group: {
+        _id: '$sender',
+        lastAt: { $max: '$timestamp' },
+        total: { $sum: 1 },
+        unreplied: { $sum: { $cond: [{ $eq: ['$replied', false] }, 1, 0] } }
+      } },
+      { $sort: { lastAt: -1 } },
+      { $limit: limit }
+    ]).toArray();
+
+    const settings = await contactSettingsCollection.find().toArray();
+    const bySender = new Map(settings.map(s => [s.sender, s]));
+    return activity.map(a => ({
+      sender: a._id,
+      lastAt: a.lastAt,
+      total: a.total,
+      unreplied: a.unreplied,
+      autoReply: bySender.get(a._id)?.autoReply ?? false
+    }));
+  } catch (err) {
+    console.error('❌ Failed to list contacts:', err);
+    return [];
+  }
+}
+
+// --- Proposed replies: generated but kept for review instead of being sent ---
+
+export async function saveProposedReply({ sender, messageRef, incoming, reply, refs = [], method = 'auto', status = 'proposed', whatsappId = null }) {
+  try {
+    if (!proposedReplyCollection) throw new Error("MongoDB not initialized");
+    // $setOnInsert only: a replayed message must never overwrite/reset a row
+    const result = await proposedReplyCollection.updateOne(
+      { messageRef },
+      { $setOnInsert: {
+        sender,
+        messageRef,
+        incoming: (incoming || '').slice(0, 500),
+        reply,
+        refs: refs.slice(0, 10),
+        method,
+        status,
+        whatsappId,
+        createdAt: new Date()
+      } },
+      { upsert: true }
+    );
+    return result.upsertedId ?? null;
+  } catch (err) {
+    console.error('❌ Failed to save proposed reply:', err.message);
+    return null;
+  }
+}
+
+export async function getRecentProposedReplies(limit = 25) {
+  try {
+    if (!proposedReplyCollection) throw new Error("MongoDB not initialized");
+    // Self-heal sends that crashed or hung mid-flight
+    await proposedReplyCollection.updateMany(
+      { status: 'sending', claimedAt: { $lt: new Date(Date.now() - 60000) } },
+      { $set: { status: 'failed', error: 'send timed out' } }
+    );
+    return await proposedReplyCollection.find().sort({ createdAt: -1 }).limit(limit).toArray();
+  } catch (err) {
+    console.error('❌ Failed to get proposed replies:', err);
+    return [];
+  }
+}
+
+// Atomic claim so a double-click (or a refresh race) cannot send twice
+export async function claimProposedReply(id) {
+  try {
+    if (!proposedReplyCollection) throw new Error("MongoDB not initialized");
+    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    const result = await proposedReplyCollection.findOneAndUpdate(
+      { _id, status: 'proposed' },
+      { $set: { status: 'sending', claimedAt: new Date() } },
+      { returnDocument: 'after' }
+    );
+    return unwrapFindOneAndUpdate(result);
+  } catch (err) {
+    console.error(`❌ Failed to claim proposed reply ${id}:`, err.message);
+    return null;
+  }
+}
+
+export async function markProposedReplySent(id, { whatsappId = null } = {}) {
+  try {
+    if (!proposedReplyCollection) throw new Error("MongoDB not initialized");
+    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    await proposedReplyCollection.updateOne(
+      { _id },
+      { $set: { status: 'sent', sentAt: new Date(), whatsappId } }
+    );
+  } catch (err) {
+    console.error(`❌ Failed to mark proposed reply ${id} as sent:`, err.message);
+  }
+}
+
+export async function markProposedReplyFailed(id, error) {
+  try {
+    if (!proposedReplyCollection) throw new Error("MongoDB not initialized");
+    const _id = typeof id === 'string' ? new ObjectId(id) : id;
+    await proposedReplyCollection.updateOne(
+      { _id },
+      { $set: { status: 'failed', error: String(error).slice(0, 300) } }
+    );
+  } catch (err) {
+    console.error(`❌ Failed to mark proposed reply ${id} as failed:`, err.message);
+  }
+}
+
+// --- Bot activity log: persistent, readable from the panel ---
+
+export async function saveLog(event, details = {}) {
+  try {
+    if (!logCollection) return null; // callable before initDatabase completes
+    const { level = 'info', ...rest } = details;
+    const flat = {};
+    for (const [k, v] of Object.entries(rest)) {
+      if (v === null || v === undefined) continue;
+      flat[k] = String(v).slice(0, 300);
+    }
+    return await logCollection.insertOne({ level, event, details: flat, createdAt: new Date() });
+  } catch (err) {
+    console.error('❌ Failed to write bot log:', err.message);
+    return null;
+  }
+}
+
+export async function getRecentLogs(limit = 100) {
+  try {
+    if (!logCollection) throw new Error("MongoDB not initialized");
+    return await logCollection.find().sort({ createdAt: -1 }).limit(limit).toArray();
+  } catch (err) {
+    console.error('❌ Failed to get bot logs:', err);
     return [];
   }
 }

@@ -6,8 +6,9 @@ import mime from 'mime-types';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
+import { ObjectId } from 'mongodb';
 
-import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted } from './storage/database.js';
+import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted, getContactSettings, setContactAutoReply, getContactsWithActivity, saveProposedReply, getRecentProposedReplies, claimProposedReply, markProposedReplySent, markProposedReplyFailed, saveLog, getRecentLogs } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
@@ -25,7 +26,9 @@ const downloadsPath = process.env.DOWNLOADS_PATH;
 const authFolder = process.env.WHATSAPP_AUTH_PATH;
 const serverPort = process.env.SERVER_PORT;
 const embeddingUrl = process.env.EMBEDDING_URL;
-const autoReplyEnabled = process.env.AUTO_REPLY === 'true';
+// Auto-reply is now per contact (contact_settings collection), toggled from the
+// web panel — the old AUTO_REPLY env var no longer does anything.
+if (process.env.AUTO_REPLY) console.warn('⚠️ AUTO_REPLY is ignored — auto-reply is now per contact, enabled from the web panel');
 const mailEnabled = process.env.MAIL_ENABLED === 'true';
 // Document indexing (PDF/docx/text extraction, optional OCR) — on by default
 const mediaIndexingEnabled = process.env.MEDIA_INDEXING !== 'false';
@@ -109,6 +112,46 @@ async function ingestMessage({ sender, messageContent, timestamp, messageId, mes
   return { savedId, day, subject };
 }
 
+// One reply pipeline for everything: per-contact gate → memory → LLM → send or
+// propose. A contact with auto-reply off (the default) gets their reply stored
+// as a proposal for the panel instead of being messaged. Never throws.
+async function generateReplyFor({ sender, savedId, incoming, force = false }) {
+  if (!incoming || incoming === 'No text') return null;
+  try {
+    const settings = await getContactSettings(sender);
+    const { context, refs } = await searchMemory(incoming, { sender });
+    const replyText = await generateAutoReply(incoming, context);
+
+    // generateAutoReply swallows LLM failures into a ⚠️ sentinel — nothing worth
+    // proposing or sending in that case
+    if (replyText.startsWith('⚠️')) {
+      await saveLog('reply.failed', { level: 'error', sender, detail: replyText });
+      return null;
+    }
+
+    if (!settings.autoReply && !force) {
+      await saveProposedReply({ sender, messageRef: savedId.toString(), incoming, reply: replyText, refs });
+      await saveLog('reply.proposed', { sender, detail: replyText.slice(0, 120) });
+      return { proposed: true };
+    }
+
+    const sock = getSocket();
+    if (!sock?.user) {
+      await saveLog('reply.skipped_offline', { level: 'warn', sender });
+      return null;
+    }
+    const sent = await sock.sendMessage(sender, { text: replyText });
+    await updateRepliedStatus(savedId);
+    await saveProposedReply({ sender, messageRef: savedId.toString(), incoming, reply: replyText, refs, status: 'sent', whatsappId: sent?.key?.id });
+    await saveLog('autoreply.sent', { sender, detail: replyText.slice(0, 120) });
+    return { sent: true };
+  } catch (err) {
+    console.error('❌ Reply pipeline failed:', err.message);
+    await saveLog('reply.error', { level: 'error', sender, detail: err.message });
+    return null;
+  }
+}
+
 // WhatsApp setup
 await startWhatsApp(authFolder, async ({ messages, type }) => {
   if (type !== 'notify') return;
@@ -125,6 +168,7 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     const messageContent = extractMessageText(msg.message);
 
     console.log(`📩 Received message from ${jid}: ${messageContent}`);
+    saveLog('message.received', { sender: jid, detail: messageContent.slice(0, 120) });
 
     const senderFolder = path.join(downloadsPath, jid.replace('@s.whatsapp.net', ''));
     if (!fs.existsSync(senderFolder)) fs.mkdirSync(senderFolder, { recursive: true });
@@ -143,18 +187,11 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
       media: isMedia ? { filePath, fileName } : null
     });
 
-    // Auto reply if enabled
-    if (autoReplyEnabled && messageContent && messageContent !== 'No text') {
-        try {
-            const { context } = await searchMemory(messageContent, { sender: jid });
-            const replyText = await generateAutoReply(messageContent, context);
-            await getSocket().sendMessage(jid, { text: replyText });
-            await updateRepliedStatus(savedId);
-            console.log(`🤖 Auto-replied to ${jid}`);
-        } catch (err) {
-            console.error('❌ Auto-reply failed:', err.message);
-        }
-    }
+    // Auto-reply (if the contact opted in) or a proposal for the panel. Not
+    // awaited on purpose: the LLM latency must not delay media download and
+    // document indexing below.
+    void generateReplyFor({ sender: jid, savedId, incoming: messageContent })
+      .catch(err => console.error('❌ Reply pipeline failed:', err.message));
 
     const activeSock = getSocket();
     const mediaPath = await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
@@ -320,29 +357,91 @@ app.get('/api/graph', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/trigger-reply', authMiddleware, async (req, res) => {
-  const { fromList } = req.body;
+  const { fromList, force } = req.body;
   if (!Array.isArray(fromList) || fromList.length === 0) return res.status(400).json({ error: '`fromList` must be a non-empty array of user JIDs' });
 
   const sock = getSocket();
   if (!sock?.user) return res.status(503).json({ error: 'WhatsApp socket not connected' });
 
   let totalReplied = 0;
+  let totalProposed = 0;
 
   try {
     for (const from of fromList) {
       const messages = await getUnrepliedMessages(from);
       for (const msg of messages) {
-        const replyText = await generateAutoReply(msg.messageContent);
-        await sock.sendMessage(msg.sender, { text: replyText });
-        await updateRepliedStatus(msg._id);
-        totalReplied++;
+        // Operator-initiated: respects the per-contact toggle unless force:true
+        const result = await generateReplyFor({ sender: msg.sender, savedId: msg._id, incoming: msg.messageContent, force: force === true });
+        if (result?.sent) totalReplied++;
+        else if (result?.proposed) totalProposed++;
       }
     }
   } catch (err) {
-    return res.status(500).json({ error: 'trigger-reply failed', details: err.message, totalReplied });
+    return res.status(500).json({ error: 'trigger-reply failed', details: err.message, totalReplied, totalProposed });
   }
 
-  res.json({ status: 'replied_to_multiple_users', totalReplied });
+  res.json({ status: 'replied_to_multiple_users', totalReplied, totalProposed });
+});
+
+// --- Per-contact auto-reply toggle, proposed replies, bot log ---
+
+app.get('/api/contacts', authMiddleware, async (_, res) => {
+  res.json(await getContactsWithActivity());
+});
+
+app.post('/api/contacts/auto-reply', authMiddleware, async (req, res) => {
+  const { sender, enabled } = req.body;
+  if (!sender || !String(sender).includes('@')) return res.status(400).json({ error: 'Missing or invalid "sender" (expected a JID)' });
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: '"enabled" must be a boolean' });
+  try {
+    res.json(await setContactAutoReply(sender, enabled));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save contact setting', details: err.message });
+  }
+});
+
+app.get('/api/proposed-replies', authMiddleware, async (req, res) => {
+  const parsed = parseInt(req.query.limit || '25', 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : 25;
+  res.json(await getRecentProposedReplies(limit));
+});
+
+// Send a proposed reply to its contact — the manual counterpart of auto-reply
+app.post('/api/proposed-replies/:id/send', authMiddleware, async (req, res) => {
+  let proposalId;
+  try {
+    proposalId = new ObjectId(req.params.id);
+  } catch {
+    return res.status(400).json({ error: 'Invalid proposal id' });
+  }
+
+  const sock = getSocket();
+  if (!sock?.user) return res.status(503).json({ error: 'WhatsApp socket not connected' });
+
+  // Atomic claim: a double-click or refresh race cannot send twice
+  const proposal = await claimProposedReply(proposalId);
+  if (!proposal) return res.status(409).json({ error: 'Proposal not found or already handled' });
+
+  try {
+    const sent = await Promise.race([
+      sock.sendMessage(proposal.sender, { text: proposal.reply }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('send timed out')), 15000))
+    ]);
+    await markProposedReplySent(proposalId, { whatsappId: sent?.key?.id });
+    await updateRepliedStatus(proposal.messageRef);
+    await saveLog('reply.sent_manual', { sender: proposal.sender, detail: proposal.reply.slice(0, 120) });
+    res.json({ status: 'sent', proposalId: req.params.id });
+  } catch (err) {
+    await markProposedReplyFailed(proposalId, err.message);
+    await saveLog('reply.send_failed', { level: 'error', sender: proposal.sender, detail: err.message });
+    res.status(502).json({ error: 'Failed to send proposal', details: err.message });
+  }
+});
+
+app.get('/api/logs', authMiddleware, async (req, res) => {
+  const parsed = parseInt(req.query.limit || '100', 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 500) : 100;
+  res.json(await getRecentLogs(limit));
 });
 
 app.listen(serverPort, () => {
