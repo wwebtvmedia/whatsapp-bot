@@ -10,14 +10,33 @@ cd "$(dirname "$0")"
 
 echo "🤖 WhatsApp AI Bot — installation"
 
+# Name the phase being installed, so a failure points at the right block and
+# the full underlying error can be read in the output above.
+CURRENT_STEP="startup"
+step() {
+  CURRENT_STEP="$1"
+  echo ""
+  echo "▶️  $1"
+}
+on_error() {
+  local code=$?
+  echo ""
+  echo "❌ Installation failed during: $CURRENT_STEP (exit code $code)"
+  echo "   The full error is printed above; nothing is silenced."
+  echo "   To trace every command, re-run: bash -x ./install.sh"
+  exit "$code"
+}
+trap on_error ERR
+
 # ---------------------------------------------------------------------------
 # 1. Detect (or install) container engine + compose (Podman first, Docker fallback)
 # ---------------------------------------------------------------------------
+step "Container engine + compose (podman/docker)"
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 
 pkg_install() {
-  if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
+  if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y "$@"
   elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y "$@"
   elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y "$@"
   elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -S --noconfirm "$@"
@@ -38,7 +57,7 @@ if [ -z "$ENGINE" ]; then
   if pkg_install podman; then
     ENGINE="podman"
   else
-    echo "❌ Could not install Podman automatically."
+    echo "❌ Could not install Podman automatically (package-manager error above)."
     echo "   Install it manually: https://podman.io/docs/installation"
     exit 1
   fi
@@ -62,7 +81,7 @@ else
 fi
 
 if [ -z "$COMPOSE" ]; then
-  echo "❌ $ENGINE is installed, but no compose provider was found."
+  echo "❌ $ENGINE is installed, but the automatic podman-compose install failed (error above)."
   echo "   Install one manually: apt install podman-compose  (or: pipx install podman-compose)"
   exit 1
 fi
@@ -71,6 +90,7 @@ echo "✔️  Using: $COMPOSE"
 # ---------------------------------------------------------------------------
 # 2. Create .env from the template on first run
 # ---------------------------------------------------------------------------
+step "Creating .env (first run only)"
 if [ ! -f .env ]; then
   cp .env.example .env
   if command -v openssl >/dev/null 2>&1; then
@@ -87,11 +107,13 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Ensure runtime directories exist (rootless engines don't create mounts)
 # ---------------------------------------------------------------------------
+step "Preparing data folders"
 mkdir -p models downloads auth backups data/db data/chroma embedding-service/cache
 
 # ---------------------------------------------------------------------------
 # 4. LLM backend: prefer the remote Ollama server, fall back to a local GGUF
 # ---------------------------------------------------------------------------
+step "Choosing the LLM backend"
 # Read a value from .env without executing it ($2 = fallback)
 env_val() {
   local v
@@ -135,7 +157,12 @@ if [ "$USE_LOCAL_LLM" = "1" ]; then
     echo "✔️  Local model found: models/model.gguf"
   else
     echo "⬇️  Downloading Qwen2.5-7B-Instruct (Q4_K_M, ~4.7 GB)..."
-    curl -L -C - --fail --progress-bar -o models/model.gguf "$GGUF_URL"
+    if ! curl -L -C - --fail --progress-bar -o models/model.gguf "$GGUF_URL"; then
+      echo "❌ Model download failed (curl error above)."
+      echo "   Resume it manually with:"
+      echo "     curl -L -C - --fail -o models/model.gguf '$GGUF_URL'"
+      exit 1
+    fi
   fi
   set_llm_env "http://llamacpp:8080/v1/chat/completions" openai model
 fi
@@ -143,11 +170,16 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Build and start the stack (llamacpp only when running a local model)
 # ---------------------------------------------------------------------------
-echo "🏗️  Building and starting services (first build downloads ~1 GB)..."
-if [ "$USE_LOCAL_LLM" = "1" ]; then
-  $COMPOSE up -d --build --profile local-llm
-else
-  $COMPOSE up -d --build
+step "Building and starting services (first build downloads ~1 GB)..."
+COMPOSE_UP=($COMPOSE up -d --build)
+if [ "$USE_LOCAL_LLM" = "1" ]; then COMPOSE_UP+=(--profile local-llm); fi
+if ! "${COMPOSE_UP[@]}"; then
+  echo "❌ Build/startup failed — the full error is printed above."
+  echo "   Inspect the stack with:"
+  echo "     $COMPOSE ps"
+  echo "     $COMPOSE logs --tail=100"
+  echo "   Retry the whole install with: ./install.sh"
+  exit 1
 fi
 
 cat <<EOF
