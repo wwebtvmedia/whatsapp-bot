@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
+import { chunkText } from './mediaText.js';
 
 // 1. Test WhatsApp Filter
 test('WhatsApp Filter: should correctly standardize a text message', () => {
@@ -55,6 +56,19 @@ test('Email Filter: should strip HTML when no plain-text part exists', () => {
 
   const filtered = filterEmailToStandardMessage(parsedEmail);
   assert.strictEqual(filtered.messageContent, 'Hello HTML world');
+});
+
+test('chunkText: splits with overlap and caps the chunk count', () => {
+  const chunks = chunkText('a'.repeat(2500), { size: 1000, overlap: 100 });
+  assert.strictEqual(chunks.length, 3);
+  assert.ok(chunks[0].length <= 1000);
+  // consecutive chunks overlap
+  assert.strictEqual(chunks[1].slice(0, 100), chunks[0].slice(-100));
+  // maxChunks hard cap
+  const capped = chunkText('b'.repeat(50000), { size: 100, overlap: 20, maxChunks: 5 });
+  assert.strictEqual(capped.length, 5);
+  // empty / whitespace-only input
+  assert.deepStrictEqual(chunkText('   '), []);
 });
 
 // 3. Test LLM Logic (Formatting)

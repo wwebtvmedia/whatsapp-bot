@@ -14,15 +14,21 @@ import {
   queryChromaDays,
   queryChromaMessages,
   hybridKeywordSearch,
+  upsertChromaDocChunks,
+  setMediaExtracted,
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
+import { extractTextFromFile, chunkText } from './mediaText.js';
 
 dotenv.config();
 
 const embeddingUrl = process.env.EMBEDDING_URL || 'http://localhost:8001/embed';
 const maxContextMessages = parseInt(process.env.CONTEXT_MAX_MESSAGES || '6', 10);
 const COARSE_RESULTS = 3;
+const ocrEnabled = process.env.MEDIA_OCR_ENABLED === 'true';
+const ocrLang = process.env.MEDIA_OCR_LANG || 'eng+fra';
+const maxDocChunks = parseInt(process.env.MEDIA_MAX_CHUNKS || '60', 10);
 
 export async function embedText(text, type = 'passage') {
   const response = await fetch(embeddingUrl, {
@@ -33,6 +39,17 @@ export async function embedText(text, type = 'passage') {
   if (!response.ok) throw new Error(`Embedding service error (${response.status})`);
   const data = await response.json();
   return data.embeddings?.[0];
+}
+
+export async function embedTexts(texts, type = 'passage') {
+  const response = await fetch(embeddingUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input: texts, type })
+  });
+  if (!response.ok) throw new Error(`Embedding service error (${response.status})`);
+  const data = await response.json();
+  return data.embeddings || [];
 }
 
 // Level 1 (coarse): find the conversation days most related to the query
@@ -129,4 +146,29 @@ export async function searchMemory(query, { sender = null } = {}) {
       lexical: kept.filter(h => h.source === 'lexical').length
     }
   };
+}
+
+/**
+ * Extract the text of a received document, chunk it and index every chunk so
+ * questions about the document's content are answerable through searchMemory.
+ * @param {{messageId: string, sender: string, day: string, ref: string, subject: string,
+ *          filePath: string, fileName: string}} doc
+ * @returns {Promise<{indexed: number, kind: string, text: string}>}
+ */
+export async function indexDocumentChunks({ messageId, sender, day, ref, subject, filePath, fileName }) {
+  const { text, kind } = await extractTextFromFile(filePath, { ocrEnabled, ocrLang });
+  if (!text) return { indexed: 0, kind, text: '' };
+
+  const chunks = chunkText(text, { maxChunks: maxDocChunks });
+  if (!chunks.length) return { indexed: 0, kind, text: '' };
+
+  const embeddings = await embedTexts(chunks);
+  await upsertChromaDocChunks(chunks.map((chunk, i) => ({
+    id: `${messageId}:chunk:${i}`,
+    text: chunk,
+    embedding: embeddings[i],
+    metadata: { sender, day, ref, subject, doc: fileName, info_type: 'document', chunk_index: i }
+  })));
+
+  return { indexed: chunks.length, kind, text };
 }

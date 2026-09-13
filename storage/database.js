@@ -135,6 +135,22 @@ export async function upsertChromaDay(id, text, embedding, metadata = {}) {
   }
 }
 
+// Batch upsert for document chunks ({id, text, embedding, metadata} items)
+export async function upsertChromaDocChunks(items) {
+  try {
+    if (!chromaMessages) throw new Error("ChromaDB not initialized");
+    if (!items.length) return;
+    await chromaMessages.upsert({
+      ids: items.map(i => i.id),
+      embeddings: items.map(i => i.embedding),
+      documents: items.map(i => i.text),
+      metadatas: items.map(i => flatMetadata(i.metadata))
+    });
+  } catch (err) {
+    console.error('❌ Failed to upsert document chunks into ChromaDB:', err.message);
+  }
+}
+
 export async function queryChromaDays(queryEmbedding, nResults = 3, where = undefined) {
   if (!chromaDays) throw new Error("ChromaDB not initialized");
   const params = {
@@ -280,6 +296,21 @@ export async function updateRepliedStatus(messageId) {
     await messageCollection.updateOne({ _id: id }, { $set: { replied: true } });
   } catch (err) {
     console.error(`❌ Failed to update replied status for ${messageId}:`, err);
+  }
+}
+
+// Record what was extracted from a media file, so the DB is browsable
+// (also useful to spot scanned PDFs: extractedText empty + indexedChunks 0)
+export async function setMediaExtracted(messageId, { text = '', chunks = 0 }) {
+  try {
+    if (!messageCollection) throw new Error("MongoDB not initialized");
+    const id = typeof messageId === 'string' ? new ObjectId(messageId) : messageId;
+    await messageCollection.updateOne(
+      { _id: id },
+      { $set: { 'media.extractedText': (text || '').slice(0, 4000), 'media.indexedChunks': chunks } }
+    );
+  } catch (err) {
+    console.error(`❌ Failed to record extraction result for ${messageId}:`, err.message);
   }
 }
 

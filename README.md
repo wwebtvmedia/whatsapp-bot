@@ -102,7 +102,7 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | `POST` | `/api/send-media` | Send a file (multipart/form-data). |
 | `POST` | `/api/send-email` | Send an email (`MAIL_ENABLED` + SMTP config required). |
 | `GET` | `/api/get-messages` | Retrieve recent messages from MongoDB. |
-| `POST` | `/api/query-memory` | Semantic search through message history. |
+| `POST` | `/api/query-memory` | Semantic search through message history **and received documents** (PDF/docx/text are extracted and indexed; images via optional OCR — `MEDIA_OCR_ENABLED`). |
 | `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs. |
 
 ---

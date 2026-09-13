@@ -17,12 +17,15 @@
     "imap": "^0.8.19",
     "long": "^5.3.2",
     "mailparser": "^3.7.4",
+    "mammoth": "^1.12.3",
     "mime-types": "^2.1.35",
     "mongodb": "^5.7.0",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
     "nodemailer": "^6.9.16",
-    "qrcode-terminal": "^0.12.0"
+    "pdf-parse": "^1.1.4",
+    "qrcode-terminal": "^0.12.0",
+    "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

@@ -7,11 +7,11 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 
-import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey } from './storage/database.js';
+import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
-import { searchMemory, embedText } from './memorySearch.js';
+import { searchMemory, embedText, indexDocumentChunks } from './memorySearch.js';
 import { startMailListener, sendMail } from './MailConnection.js';
 
 dotenv.config();
@@ -27,6 +27,8 @@ const serverPort = process.env.SERVER_PORT;
 const embeddingUrl = process.env.EMBEDDING_URL;
 const autoReplyEnabled = process.env.AUTO_REPLY === 'true';
 const mailEnabled = process.env.MAIL_ENABLED === 'true';
+// Document indexing (PDF/docx/text extraction, optional OCR) — on by default
+const mediaIndexingEnabled = process.env.MEDIA_INDEXING !== 'false';
 const apiToken = process.env.API_TOKEN;
 if (!apiToken) console.warn('⚠️ API_TOKEN is not set — protected endpoints will reject every request');
 
@@ -104,7 +106,7 @@ async function ingestMessage({ sender, messageContent, timestamp, messageId, mes
     }
   }
 
-  return savedId;
+  return { savedId, day, subject };
 }
 
 // WhatsApp setup
@@ -132,7 +134,7 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     const fileName = `${messageId}.${extension}`;
     const filePath = path.join(senderFolder, fileName);
 
-    const savedId = await ingestMessage({
+    const { savedId, day, subject } = await ingestMessage({
       sender: jid,
       messageContent,
       timestamp,
@@ -155,7 +157,23 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     }
 
     const activeSock = getSocket();
-    await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
+    const mediaPath = await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
+
+    // Index the document's content so questions about it are answerable
+    if (mediaPath && mediaIndexingEnabled) {
+      try {
+        const result = await indexDocumentChunks({
+          messageId, sender: jid, day, ref: savedId.toString(), subject,
+          filePath: mediaPath,
+          fileName: path.basename(mediaPath)
+        });
+        await setMediaExtracted(savedId, { text: result.text, chunks: result.indexed });
+        if (result.indexed > 0) console.log(`📄 Document indexed: ${result.indexed} chunk(s) [${result.kind}]`);
+        else console.log(`📄 No text extracted from ${path.basename(mediaPath)} [${result.kind}]`);
+      } catch (err) {
+        console.error('❌ Document indexing failed:', err.message);
+      }
+    }
   }
 });
 

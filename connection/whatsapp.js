@@ -47,17 +47,25 @@ export async function sendMedia(sock, number, mediaBuffer, mimetype, filename = 
   });
 }
 
+// Downloads the media of a message; returns the written file path (or null on
+// failure) so the caller can index the document's content.
 export async function tryDownloadMedia(msg, downloadsPath, logger, reuploadRequest) {
   const type = extractMessageType(msg.message);
   const media = msg.message[type];
-  if (!isMediaType(type)) return;
+  if (!isMediaType(type)) return null;
 
-  const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest });
-  const senderFolder = path.join(downloadsPath, msg.key.remoteJid.replace('@s.whatsapp.net', ''));
-  const extension = getExtensionByType(type, media);
-  const filePath = path.join(senderFolder, `${msg.key.id}.${extension}`);
+  try {
+    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest });
+    const senderFolder = path.join(downloadsPath, msg.key.remoteJid.replace('@s.whatsapp.net', ''));
+    const extension = getExtensionByType(type, media);
+    const filePath = path.join(senderFolder, `${msg.key.id}.${extension}`);
 
-  fs.writeFileSync(filePath, buffer);
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
+  } catch (err) {
+    console.error('❌ Media download failed:', err.message);
+    return null;
+  }
 }
 
 export function extractMessageText(message) {
