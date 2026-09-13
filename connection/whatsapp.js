@@ -7,6 +7,12 @@ import { useMultiFileAuthState, fetchLatestBaileysVersion, makeWASocket, downloa
 
 let sock = null;
 
+// Always fetch the live socket through this helper: startWhatsApp() replaces the
+// module-level socket on reconnect, so any kept reference would go stale.
+export function getSocket() {
+  return sock;
+}
+
 export async function startWhatsApp(authFolder, onMessage) {
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
@@ -44,7 +50,7 @@ export async function sendMedia(sock, number, mediaBuffer, mimetype, filename = 
 export async function tryDownloadMedia(msg, downloadsPath, logger, reuploadRequest) {
   const type = extractMessageType(msg.message);
   const media = msg.message[type];
-  if (!['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'].includes(type)) return;
+  if (!isMediaType(type)) return;
 
   const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest });
   const senderFolder = path.join(downloadsPath, msg.key.remoteJid.replace('@s.whatsapp.net', ''));
@@ -64,8 +70,11 @@ export function extractMessageText(message) {
 }
 
 export function extractMessageType(message) {
-  const mediaTypes = ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'];
-  return Object.keys(message).find(type => mediaTypes.includes(type)) || 'text';
+  return Object.keys(message).find(isMediaType) || 'text';
+}
+
+export function isMediaType(type) {
+  return ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'].includes(type);
 }
 
 export function getExtensionByType(type, mediaMsg = {}) {

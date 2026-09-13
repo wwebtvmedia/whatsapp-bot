@@ -1,0 +1,18 @@
+# Keep secrets and local state out of the image (env vars come from env_file at runtime)
+.env
+.env.*
+auth/
+
+# Mounted as volumes by docker-compose; no need to bake them in
+node_modules
+models
+downloads
+data
+backups
+logs
+
+# Local dev/test artifacts
+.git
+*.log
+latest
+test_bot_rest.py

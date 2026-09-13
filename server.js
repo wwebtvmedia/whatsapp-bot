@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 
 import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, insertIntoChroma } from './storage/database.js';
-import { startWhatsApp, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia } from './connection/whatsapp.js';
+import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
 import { generateAutoReply } from './answerGenerator.js';
 
 dotenv.config();
@@ -33,7 +33,7 @@ const apiToken = process.env.API_TOKEN;
 const { messageCollection, chromaCollection } = await initDatabase(mongoUrl, chromaUrl);
 
 // WhatsApp setup
-let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
+await startWhatsApp(authFolder, async ({ messages, type }) => {
   if (type !== 'notify') return;
 
   for (const msg of messages) {
@@ -52,6 +52,7 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
     const senderFolder = path.join(downloadsPath, jid.replace('@s.whatsapp.net', ''));
     if (!fs.existsSync(senderFolder)) fs.mkdirSync(senderFolder, { recursive: true });
 
+    const isMedia = isMediaType(messageType);
     const extension = getExtensionByType(messageType, msg.message[messageType]);
     const fileName = `${messageId}.${extension}`;
     const filePath = path.join(senderFolder, fileName);
@@ -76,8 +77,8 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
       messageContent, 
       timestamp, 
       messageId, 
-      messageType, 
-      media: { filePath, fileName },
+      messageType,
+      media: isMedia ? { filePath, fileName } : null,
       embedding
     });
 
@@ -89,7 +90,7 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
     if (autoReplyEnabled && messageContent && messageContent !== 'No text') {
         try {
             const replyText = await generateAutoReply(messageContent, chromaCollection);
-            await sock.sendMessage(jid, { text: replyText });
+            await getSocket().sendMessage(jid, { text: replyText });
             await updateRepliedStatus(savedId);
             console.log(`🤖 Auto-replied to ${jid}`);
         } catch (err) {
@@ -97,7 +98,8 @@ let sock = await startWhatsApp(authFolder, async ({ messages, type }) => {
         }
     }
 
-    await tryDownloadMedia(msg, downloadsPath, sock.logger, sock.updateMediaMessage);
+    const activeSock = getSocket();
+    await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
   }
 });
 
@@ -117,6 +119,7 @@ const authMiddleware = (req, res, next) => {
 };
 
 app.get('/api/health', (_, res) => {
+  const sock = getSocket();
   sock?.user
     ? res.json({ status: 'ok', user: sock.user })
     : res.status(500).json({ status: 'disconnected' });
@@ -126,7 +129,7 @@ app.post('/api/send-message', authMiddleware, async (req, res) => {
   const { to, message } = req.body;
   if (!to || !message) return res.status(400).json({ error: 'Missing fields' });
   try {
-    await sock.sendMessage(to, { text: message });
+    await getSocket().sendMessage(to, { text: message });
     res.json({ status: 'sent' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -138,7 +141,7 @@ app.post('/api/send-media', authMiddleware, upload.single('file'), async (req, r
   const file = req.file;
   if (!number || !file) return res.status(400).json({ error: 'Missing file or number' });
   try {
-    await sendMedia(sock, number, file.buffer, file.mimetype, file.originalname);
+    await sendMedia(getSocket(), number, file.buffer, file.mimetype, file.originalname);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -157,9 +160,13 @@ app.get('/api/get-media', authMiddleware, async (req, res) => {
   const mediaDoc = await getLatestMedia(after);
   if (!mediaDoc) return res.status(404).json({ error: 'No media found' });
 
+  if (!fs.existsSync(mediaDoc.media.filePath)) {
+    return res.status(404).json({ error: 'Media file missing on disk' });
+  }
+
   const mimeType = mime.lookup(mediaDoc.media.fileName) || 'application/octet-stream';
   res.setHeader('Content-Type', mimeType);
-  res.setHeader('Content-Disposition', `inline; filename="${mediaDoc.media.fileName}"`);
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(mediaDoc.media.fileName)}"`);
   fs.createReadStream(mediaDoc.media.filePath).pipe(res);
 });
 
@@ -168,7 +175,16 @@ app.post('/api/query-memory', authMiddleware, async (req, res) => {
   if (!text) return res.status(400).json({ error: 'Missing "text" field' });
 
   try {
-    const results = await chromaCollection.query({ queryTexts: [text], nResults: 5 });
+    // Embed the query with the same model used at ingestion, then search by vectors
+    const response = await fetch(embeddingUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: [text], type: 'query' })
+    });
+    if (!response.ok) throw new Error(`Embedding service error (${response.status})`);
+    const { embeddings } = await response.json();
+
+    const results = await chromaCollection.query({ queryEmbeddings: embeddings, nResults: 5 });
     res.json({ query: text, matches: results.documents?.[0] || [] });
   } catch (err) {
     res.status(500).json({ error: 'Failed to query memory', details: err.message });

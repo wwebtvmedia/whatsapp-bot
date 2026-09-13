@@ -32,6 +32,11 @@
   <div id="media-status" class="log"></div>
 
   <script>
+    // Protected endpoints require the x-api-token header; ask once per session.
+    const apiToken = sessionStorage.getItem('apiToken') || prompt('Enter API token:');
+    sessionStorage.setItem('apiToken', apiToken);
+    const authHeaders = { 'x-api-token': apiToken };
+
     async function checkHealth() {
       const res = await fetch('/api/health');
       const data = await res.json();
@@ -44,7 +49,7 @@
 
       const res = await fetch('/api/send-message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({ to, message })
       });
 
@@ -61,6 +66,7 @@
 
       const res = await fetch('/api/send-media', {
         method: 'POST',
+        headers: authHeaders,
         body: formData
       });
 

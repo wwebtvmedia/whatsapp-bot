@@ -12,6 +12,7 @@ auth/
 *.json
 !package.json
 !composer.json
+!package-lock.json
 
 # Environment Variables
 .env
@@ -25,8 +26,11 @@ backups/
 storage/*.db
 storage/*.sqlite
 
+# Local LLM binaries (keep the placeholder README tracked)
+models/*
+!models/README.txt
+
 # Docker
-.dockerignore
 # (Optional: keep docker-compose.yml if you want others to be able to run it)
 
 # OS Files
