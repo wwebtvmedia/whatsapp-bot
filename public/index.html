@@ -108,6 +108,19 @@
     .digest .d-preview { font-size: .85rem; margin-top: .35rem; color: var(--ink); }
     .digest .chips { margin-top: .4rem; display: flex; gap: .3rem; flex-wrap: wrap; }
 
+    /* --- Ask the memory --- */
+    .ask-sender { max-width: 220px; font-family: var(--mono); font-size: .82rem; }
+    .answer {
+      background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--teal);
+      border-radius: 0 8px 8px 0; padding: .8rem 1rem; font-size: .95rem; white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .sources { font-family: var(--mono); font-size: .78rem; color: var(--muted); padding: .5rem 0 0; }
+    .sources div { padding: .15rem 0; overflow-wrap: anywhere; }
+    .sources .src-doc { color: var(--amber); }
+    details { margin-top: .5rem; }
+    details summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
+
     .log {
       background: var(--card); border: 1px solid var(--line); border-radius: 8px;
       padding: .8rem; margin-top: .5rem; white-space: pre-wrap; font-size: .88rem;
@@ -135,6 +148,22 @@
       <input type="text" id="journal-filter" placeholder="Filter by sender, subject or content…" oninput="renderJournal()" />
     </div>
     <div id="journal" class="empty">Loading…</div>
+  </section>
+
+  <section>
+    <h2>Ask the memory</h2>
+    <div class="toolbar">
+      <input type="text" id="ask-text" placeholder="e.g. what is the amount on the invoice I received?" onkeydown="if(event.key==='Enter')askMemory()" />
+      <input type="text" id="ask-sender" class="ask-sender" placeholder="sender (optional)" />
+      <button class="primary" id="ask-btn" onclick="askMemory()">Ask</button>
+    </div>
+    <div id="ask-result" hidden>
+      <div class="answer" id="ask-answer"></div>
+      <details id="ask-details">
+        <summary>Sources used</summary>
+        <div id="ask-sources" class="sources"></div>
+      </details>
+    </div>
   </section>
 
   <section>
@@ -301,6 +330,43 @@
           <div class="chips">${subjects}</div>
         </div>`;
       }).join('');
+    }
+
+    // --- Ask the memory: question → retrieval + LLM answer ---
+    async function askMemory() {
+      const text = document.getElementById('ask-text').value.trim();
+      const sender = document.getElementById('ask-sender').value.trim();
+      const btn = document.getElementById('ask-btn');
+      const box = document.getElementById('ask-result');
+      const answerEl = document.getElementById('ask-answer');
+      const sourcesEl = document.getElementById('ask-sources');
+      if (!text) { box.hidden = false; answerEl.textContent = 'Type a question first.'; return; }
+
+      btn.disabled = true;
+      btn.textContent = 'Thinking…';
+      box.hidden = false;
+      answerEl.textContent = 'Searching the memory and generating an answer — this can take a few seconds.';
+      sourcesEl.textContent = '';
+      document.getElementById('ask-details').open = false;
+
+      try {
+        const res = await fetchAuth('/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, sender: sender || undefined })
+        });
+        const data = await res.json();
+        answerEl.textContent = data.answer || data.error || 'No answer returned.';
+        const refs = data.refs || [];
+        sourcesEl.innerHTML = refs.length
+          ? refs.map(r => `<div>${esc(r.day || '????-??-??')} · ${esc(r.sender || '?')}${r.doc ? ` · <span class="src-doc">📄 ${esc(r.doc)}</span>` : ''} · ${esc(r.source || '?')}</div>`).join('')
+          : '<div>No matching passage found for this question.</div>';
+      } catch (err) {
+        answerEl.textContent = 'Request failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Ask';
+      }
     }
 
     let autoTimer = null;

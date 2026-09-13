@@ -138,7 +138,7 @@ export async function searchMemory(query, { sender = null } = {}) {
   return {
     context,
     matches: kept.map(h => h.text),
-    refs: kept.map(h => ({ ref: h.meta?.ref, sender: h.meta?.sender, day: h.meta?.day, source: h.source })),
+    refs: kept.map(h => ({ ref: h.meta?.ref, sender: h.meta?.sender, day: h.meta?.day, source: h.source, doc: h.meta?.doc })),
     used: {
       route,
       candidateDays,

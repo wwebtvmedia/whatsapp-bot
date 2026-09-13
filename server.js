@@ -296,6 +296,20 @@ app.post('/api/query-memory', authMiddleware, async (req, res) => {
   }
 });
 
+// Full question → answer: retrieval + LLM, same pipeline as the WhatsApp auto-reply
+app.post('/api/ask', authMiddleware, async (req, res) => {
+  const { text, sender } = req.body;
+  if (!text) return res.status(400).json({ error: 'Missing "text" field' });
+
+  try {
+    const { context, refs, used } = await searchMemory(text, { sender: sender || null });
+    const answer = await generateAutoReply(text, context);
+    res.json({ question: text, answer, refs, used });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to answer', details: err.message });
+  }
+});
+
 app.get('/api/graph', authMiddleware, async (req, res) => {
   try {
     const maxEdges = parseInt(req.query.maxEdges || '300', 10);
