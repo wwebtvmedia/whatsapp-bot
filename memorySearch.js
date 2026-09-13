@@ -26,7 +26,7 @@ dotenv.config();
 const embeddingUrl = process.env.EMBEDDING_URL || 'http://localhost:8001/embed';
 const maxContextMessages = parseInt(process.env.CONTEXT_MAX_MESSAGES || '6', 10);
 const COARSE_RESULTS = 3;
-const ocrEnabled = process.env.MEDIA_OCR_ENABLED === 'true';
+const ocrEnabled = process.env.MEDIA_OCR_ENABLED !== 'false';
 const ocrLang = process.env.MEDIA_OCR_LANG || 'eng+fra';
 const maxDocChunks = parseInt(process.env.MEDIA_MAX_CHUNKS || '60', 10);
 

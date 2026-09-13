@@ -6,6 +6,7 @@
 //   - Audio/video: not supported (would need a transcription model)
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js'; // lib entry: avoids the package's debug auto-run
 import mammoth from 'mammoth';
@@ -14,6 +15,8 @@ import { createWorker } from 'tesseract.js';
 const TEXT_EXTENSIONS = ['.txt', '.md', '.csv', '.json', '.log', '.xml', '.html'];
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'];
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+// Language data is downloaded on first OCR and cached outside the app dir
+const TESSDATA_DIR = path.join(os.tmpdir(), 'tessdata');
 
 /**
  * Extract the readable text of a downloaded media file.
@@ -42,7 +45,8 @@ export async function extractTextFromFile(filePath, { ocrEnabled = false, ocrLan
     }
     if (IMAGE_EXTENSIONS.includes(ext)) {
       if (!ocrEnabled) return { text: '', kind: 'image-ocr-disabled' };
-      const worker = await createWorker(ocrLang);
+      fs.mkdirSync(TESSDATA_DIR, { recursive: true });
+      const worker = await createWorker(ocrLang, 1, { cachePath: TESSDATA_DIR });
       try {
         const { data } = await worker.recognize(filePath);
         return { text: (data.text || '').trim(), kind: 'ocr' };
