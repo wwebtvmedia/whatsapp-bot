@@ -11,19 +11,59 @@ cd "$(dirname "$0")"
 echo "🤖 WhatsApp AI Bot — installation"
 
 # ---------------------------------------------------------------------------
-# 1. Detect container engine + compose (Podman first, Docker as fallback)
+# 1. Detect (or install) container engine + compose (Podman first, Docker fallback)
 # ---------------------------------------------------------------------------
-if command -v podman-compose >/dev/null 2>&1; then
-  COMPOSE="podman-compose"
-elif command -v podman >/dev/null 2>&1 && podman compose version >/dev/null 2>&1; then
-  COMPOSE="podman compose"
-elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-  COMPOSE="docker-compose"
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+
+pkg_install() {
+  if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
+  elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y "$@"
+  elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y "$@"
+  elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -S --noconfirm "$@"
+  else
+    return 1
+  fi
+}
+
+ENGINE=""
+if command -v podman >/dev/null 2>&1; then
+  ENGINE="podman"
+elif command -v docker >/dev/null 2>&1; then
+  ENGINE="docker"
+fi
+
+if [ -z "$ENGINE" ]; then
+  echo "📦 No container engine found — installing Podman..."
+  if pkg_install podman; then
+    ENGINE="podman"
+  else
+    echo "❌ Could not install Podman automatically."
+    echo "   Install it manually: https://podman.io/docs/installation"
+    exit 1
+  fi
+fi
+
+COMPOSE=""
+if [ "$ENGINE" = "podman" ]; then
+  if command -v podman-compose >/dev/null 2>&1; then
+    COMPOSE="podman-compose"
+  elif podman compose version >/dev/null 2>&1; then
+    COMPOSE="podman compose"
+  elif pkg_install podman-compose && command -v podman-compose >/dev/null 2>&1; then
+    COMPOSE="podman-compose"
+  fi
 else
-  echo "❌ No container engine found."
-  echo "   Install Podman first: https://podman.io/docs/installation"
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE="docker-compose"
+  fi
+fi
+
+if [ -z "$COMPOSE" ]; then
+  echo "❌ $ENGINE is installed, but no compose provider was found."
+  echo "   Install one manually: apt install podman-compose  (or: pipx install podman-compose)"
   exit 1
 fi
 echo "✔️  Using: $COMPOSE"

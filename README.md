@@ -71,7 +71,7 @@ To run the local service manually: `podman-compose up -d --profile local-llm`.
 ./install.sh
 ```
 
-Detects Podman or Docker automatically, creates `.env` on first run (with a generated `API_TOKEN`), prepares the data folders, then builds and starts the whole stack.
+Detects Podman or Docker automatically (installs Podman and `podman-compose` via `apt`/`dnf`/`pacman` if missing), creates `.env` on first run (with a generated `API_TOKEN`), prepares the data folders, then builds and starts the whole stack.
 
 ### Using Podman
 
