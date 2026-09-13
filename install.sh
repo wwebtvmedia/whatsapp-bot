@@ -50,20 +50,52 @@ fi
 mkdir -p models downloads auth backups data/db data/chroma embedding-service/cache
 
 # ---------------------------------------------------------------------------
-# 4. LLM model check (needed for auto-replies, everything else works without)
+# 4. LLM backend: prefer the remote Ollama server, fall back to a local GGUF
 # ---------------------------------------------------------------------------
-if [ ! -f models/model.gguf ]; then
-  echo "⚠️  models/model.gguf not found — the LLM service will stay down."
-  echo "    Download a GGUF model (e.g. Qwen2 or Llama-3), rename it to"
-  echo "    model.gguf and put it in models/. The bot starts fine without it;"
-  echo "    auto-replies will fail until the model is in place."
+OLLAMA_REMOTE="${OLLAMA_REMOTE:-http://192.168.1.194:11434}"
+REMOTE_MODEL="${REMOTE_MODEL:-bestmodel:latest}"
+# Fast medium 7B-class model (Q4_K_M quant, ~4.7 GB), good on CPU-only hosts
+GGUF_URL="https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+
+set_llm_env() {
+  sed -i "s|^LLM_URL=.*|LLM_URL=$1|" .env
+  sed -i "s|^LLM_TYPE=.*|LLM_TYPE=$2|" .env
+  sed -i "s|^LLM_MODEL=.*|LLM_MODEL=$3|" .env
+}
+
+USE_LOCAL_LLM=1
+REMOTE_TAGS=$(curl -s --max-time 5 "$OLLAMA_REMOTE/api/tags" || true)
+
+if echo "$REMOTE_TAGS" | grep -q "\"name\":\"$REMOTE_MODEL\""; then
+  echo "✔️  Remote Ollama found at $OLLAMA_REMOTE — using '$REMOTE_MODEL'"
+  set_llm_env "$OLLAMA_REMOTE/api/chat" ollama "$REMOTE_MODEL"
+  USE_LOCAL_LLM=0
+elif [ -n "$REMOTE_TAGS" ]; then
+  echo "⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing."
+  echo "    Models available on the remote:"
+  echo "$REMOTE_TAGS" | tr ',' '\n' | grep '"name"' | cut -d'"' -f4 | grep -v '^name$' | sed 's/^/      - /'
+  echo "    Falling back to a local model."
+fi
+
+if [ "$USE_LOCAL_LLM" = "1" ]; then
+  if [ -f models/model.gguf ]; then
+    echo "✔️  Local model found: models/model.gguf"
+  else
+    echo "⬇️  Downloading Qwen2.5-7B-Instruct (Q4_K_M, ~4.7 GB)..."
+    curl -L -C - --fail --progress-bar -o models/model.gguf "$GGUF_URL"
+  fi
+  set_llm_env "http://llamacpp:8080/v1/chat/completions" openai model
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Build and start the stack
+# 5. Build and start the stack (llamacpp only when running a local model)
 # ---------------------------------------------------------------------------
 echo "🏗️  Building and starting services (first build downloads ~1 GB)..."
-$COMPOSE up -d --build
+if [ "$USE_LOCAL_LLM" = "1" ]; then
+  $COMPOSE up -d --build --profile local-llm
+else
+  $COMPOSE up -d --build
+fi
 
 cat <<EOF
 

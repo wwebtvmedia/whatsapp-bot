@@ -55,6 +55,9 @@ services:
       - mongo
 
   llamacpp:
+    # Only started with `--profile local-llm` (install.sh starts it when no
+    # remote Ollama server is reachable)
+    profiles: ["local-llm"]
     image: ghcr.io/ggerganov/llama.cpp:server
     container_name: llamacpp
     restart: always

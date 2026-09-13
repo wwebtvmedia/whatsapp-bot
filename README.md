@@ -52,11 +52,14 @@ SERVER_PORT=3000
 API_TOKEN=YOUR_SECRET_TOKEN_HERE
 ```
 
-### 🧠 LLM Setup (Llama.cpp)
+### 🧠 LLM Setup (automatic)
 
-1. Create a `models/` directory in the root.
-2. Download a GGUF model (e.g., Qwen2 or Llama-3) and place it in `models/model.gguf`.
-3. Set `LLM_TYPE=openai` and `LLM_URL=http://llamacpp:8080/v1/chat/completions` in your `.env`.
+`install.sh` picks the best available backend for you:
+
+1. **Remote Ollama** (default: `http://192.168.1.194:11434`, model `bestmodel:latest`) — used when the server is reachable. Override with `OLLAMA_REMOTE=... ./install.sh` or `REMOTE_MODEL=... ./install.sh`.
+2. **Local llama.cpp** (fallback) — downloads a fast medium 7B model (Qwen2.5-7B-Instruct, Q4_K_M ~4.7 GB) to `models/model.gguf` and starts the bundled `llamacpp` service (`--profile local-llm`).
+
+To run the local service manually: `podman-compose up -d --profile local-llm`.
 
 ---
 
