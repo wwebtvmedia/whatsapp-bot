@@ -6,7 +6,7 @@ A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB.
 
 - **WhatsApp Integration:** Powered by `@whiskeysockets/baileys`.
 - **Media Management:** Automatically downloads and organizes media files (images, videos, etc.) by sender.
-- **Semantic Memory:** Uses **ChromaDB** and a custom **Python Embedding Service** (`all-MiniLM-L6-v2`) to store and query message context.
+- **Semantic Memory:** Uses **ChromaDB** and a custom **Python Embedding Service** (multilingual E5 by default, configurable via `EMBEDDING_MODEL`) to store and query message context.
 - **AI-Powered Replies:** Generates automated or manual replies using **Ollama** or **Llama.cpp** via an OpenAI-compatible API.
 - **Database:** Uses **MongoDB** for persistent message and metadata storage.
 - **REST API:** Control the bot, send messages/media, and query memory via a built-in Express server.
@@ -62,7 +62,15 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 
 ## 🏃 How to Run
 
-### Using Podman (Recommended)
+### One-command Install (Recommended)
+
+```bash
+./install.sh
+```
+
+Detects Podman or Docker automatically, creates `.env` on first run (with a generated `API_TOKEN`), prepares the data folders, then builds and starts the whole stack.
+
+### Using Podman
 
 ```bash
 # Build and start all services
