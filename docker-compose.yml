@@ -50,6 +50,7 @@ services:
     command: ["python", "main.py"]
     environment:
       - TRANSFORMERS_CACHE=/app/cache
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
     depends_on:
       - mongo
 

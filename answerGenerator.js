@@ -7,6 +7,18 @@ dotenv.config();
 const llmUrl = process.env.LLM_URL || "http://localhost:11434/api/chat";
 const llmModel = process.env.LLM_MODEL || "qwen2:7b";
 const llmType = process.env.LLM_TYPE || "ollama"; // 'ollama' or 'openai' (for llama.cpp)
+const embeddingUrl = process.env.EMBEDDING_URL || "http://localhost:8001/embed";
+
+async function embedQuery(text) {
+  const response = await fetch(embeddingUrl, {
+    method: 'POST',
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: [text], type: 'query' })
+  });
+  if (!response.ok) throw new Error(`Embedding service error (${response.status})`);
+  const data = await response.json();
+  return data.embeddings?.[0];
+}
 
 export async function queryLLM(context, query) {
   const systemPrompt = "You are a helpful assistant. Use the following context to answer the user's question. Context:\n" + context;
@@ -70,8 +82,11 @@ export async function queryLLM(context, query) {
 
 export async function generateAutoReply(inputText, chromaCollection) {
   try {
+    // Query with embeddings from the same model used for ingestion,
+    // not ChromaDB's built-in default (a different, English-only model)
+    const queryEmbedding = await embedQuery(inputText);
     const results = await chromaCollection.query({
-      queryTexts: [inputText],
+      queryEmbeddings: [queryEmbedding],
       nResults: 3
     });
 
