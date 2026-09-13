@@ -10,6 +10,7 @@ let proposedReplyCollection;   // LLM replies kept for review instead of being s
 let logCollection;      // bot activity log, readable from the panel
 let chromaMessages;     // fine-grained level: every message
 let chromaDays;         // coarse level: one embedding per sender+day
+let mongoClient;        // kept so tests (or a shutdown hook) can disconnect
 
 export function dayKey(date) {
   return date.toISOString().slice(0, 10);
@@ -18,7 +19,7 @@ export function dayKey(date) {
 export async function initDatabase(mongoUrl, chromaUrl, dbName = 'mcp', collectionName = 'messages', chromaRawName = 'messages', chromaDaysName = 'conversation_days') {
   try {
     // MongoDB setup
-    const mongoClient = new MongoClient(mongoUrl);
+    mongoClient = new MongoClient(mongoUrl);
     await mongoClient.connect();
     const db = mongoClient.db(dbName);
     messageCollection = db.collection(collectionName);
@@ -53,6 +54,17 @@ export async function initDatabase(mongoUrl, chromaUrl, dbName = 'mcp', collecti
   } catch (err) {
     console.error('❌ Failed to initialize databases:', err);
     throw err;
+  }
+}
+
+// Close the Mongo connection so short-lived processes (the test runner) can
+// exit instead of waiting on open sockets. The server never calls this.
+export async function closeDatabase() {
+  if (mongoClient) {
+    await mongoClient.close();
+    mongoClient = null;
+    messageCollection = digestCollection = graphCollection = null;
+    contactSettingsCollection = proposedReplyCollection = logCollection = null;
   }
 }
 
@@ -212,7 +224,9 @@ export async function upsertDailyDigest({ key, sender, day, subject, text }) {
     },
     { upsert: true, returnDocument: 'after' }
   );
-  return doc;
+  // Unwrapped, or server.js would read `undefined` off the driver envelope and
+  // never refresh the day-digest embedding
+  return unwrapFindOneAndUpdate(doc);
 }
 
 export async function getDailyDigest(key) {

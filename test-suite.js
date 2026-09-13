@@ -4,6 +4,104 @@ import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
 import { chunkText } from './mediaText.js';
+import {
+  initDatabase,
+  closeDatabase,
+  upsertDailyDigest,
+  getDailyDigest,
+  getContactSettings,
+  setContactAutoReply,
+  saveProposedReply,
+  getRecentProposedReplies,
+  claimProposedReply,
+  markProposedReplySent,
+  saveLog,
+  getRecentLogs
+} from './storage/database.js';
+
+// 4. Storage layer — needs MongoDB (+ ChromaDB for initDatabase); every test
+// skips cleanly when the services are not running, so `npm test` stays green
+// anywhere. A dedicated database (`mcp_test`) keeps the real data untouched.
+let storageUp; // undefined = not tried yet, boolean afterwards
+async function storageAvailable() {
+  if (storageUp === undefined) {
+    try {
+      await initDatabase(
+        process.env.MONGO_URL_TEST || 'mongodb://127.0.0.1:27017',
+        process.env.CHROMA_URL_TEST || 'http://127.0.0.1:8000',
+        'mcp_test'
+      );
+      storageUp = true;
+    } catch {
+      storageUp = false;
+    }
+  }
+  return storageUp;
+}
+
+const uniqueRef = () => `test-${process.pid}-${Math.random().toString(36).slice(2)}`;
+
+test('Storage: upsertDailyDigest returns the digest doc itself (not the driver envelope)', async (t) => {
+  if (!await storageAvailable()) return t.skip('MongoDB/ChromaDB not running');
+  const key = uniqueRef();
+  await upsertDailyDigest({ key, sender: 's', day: '2026-09-13', subject: 'invoice', text: 'a' });
+  const doc = await upsertDailyDigest({ key, sender: 's', day: '2026-09-13', subject: 'invoice', text: 'b' });
+  // The bug this guards against: `{value: …}` wrapping made `.count` undefined
+  // and silently disabled the day-digest embedding in server.js
+  assert.strictEqual(doc.count, 2);
+  assert.deepStrictEqual(doc.texts, ['a', 'b']);
+  assert.strictEqual((await getDailyDigest(key)).key, key);
+});
+
+test('Storage: auto-reply defaults to off and toggles per contact', async (t) => {
+  if (!await storageAvailable()) return t.skip('MongoDB/ChromaDB not running');
+  const sender = `${uniqueRef()}@s.whatsapp.net`;
+  assert.strictEqual((await getContactSettings(sender)).autoReply, false);
+  const saved = await setContactAutoReply(sender, true);
+  assert.strictEqual(saved.autoReply, true);
+  assert.strictEqual((await getContactSettings(sender)).autoReply, true);
+  assert.strictEqual((await setContactAutoReply(sender, false)).autoReply, false);
+});
+
+test('Storage: proposed replies are idempotent per message and claimed atomically', async (t) => {
+  if (!await storageAvailable()) return t.skip('MongoDB/ChromaDB not running');
+  const sender = `${uniqueRef()}@s.whatsapp.net`;
+  const messageRef = uniqueRef();
+  await saveProposedReply({ sender, messageRef, incoming: 'hello', reply: 'draft', refs: [] });
+  // A replayed messages.upsert must neither duplicate nor reset the row
+  await saveProposedReply({ sender, messageRef, incoming: 'REPLAYED', reply: 'REPLAYED', refs: [] });
+
+  const all = await getRecentProposedReplies(50);
+  const mine = all.filter(p => p.messageRef === messageRef);
+  assert.strictEqual(mine.length, 1);
+  assert.strictEqual(mine[0].status, 'proposed');
+  assert.strictEqual(mine[0].incoming, 'hello');
+
+  const claimed = await claimProposedReply(mine[0]._id);
+  assert.strictEqual(claimed.status, 'sending');
+  // Second claim on the same row must fail (double-click protection)
+  assert.strictEqual(await claimProposedReply(mine[0]._id), null);
+
+  await markProposedReplySent(mine[0]._id, { whatsappId: 'waid' });
+  const sent = (await getRecentProposedReplies(50)).find(p => p.messageRef === messageRef);
+  assert.strictEqual(sent.status, 'sent');
+});
+
+test('Storage: bot log round-trips and is readable newest-first', async (t) => {
+  if (!await storageAvailable()) return t.skip('MongoDB/ChromaDB not running');
+  const token = uniqueRef();
+  await saveLog(`test.ev1.${token}`, { sender: 'a', detail: 'first' });
+  await saveLog(`test.ev2.${token}`, { level: 'error', sender: 'a', detail: 'second' });
+  const logs = await getRecentLogs(50);
+  const mine = logs.filter(l => l.event.includes(token));
+  assert.strictEqual(mine.length, 2);
+  assert.strictEqual(mine[0].event, `test.ev2.${token}`); // newest first
+  assert.strictEqual(mine[0].level, 'error');
+  assert.strictEqual(mine[1].level, 'info');
+});
+
+// Release the Mongo socket so the test runner can exit
+test.after(() => closeDatabase());
 
 // 1. Test WhatsApp Filter
 test('WhatsApp Filter: should correctly standardize a text message', () => {
