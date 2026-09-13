@@ -17,7 +17,7 @@ services:
       - embeddings
 
   mongo:
-    image: mongo:6
+    image: docker.io/library/mongo:6
     restart: always
     ports:
       - "127.0.0.1:27017:27017"
@@ -25,7 +25,7 @@ services:
       - ./data/db:/data/db:Z
 
   chromadb:
-    image: chromadb/chroma:latest
+    image: docker.io/chromadb/chroma:latest
     restart: always
     ports:
       - "127.0.0.1:8000:8000"
@@ -54,6 +54,8 @@ services:
     # Only started with `--profile local-llm` (install.sh starts it when no
     # remote Ollama server is reachable)
     profiles: ["local-llm"]
+    # Images are fully qualified: podman refuses short names when the host has
+    # no unqualified-search-registries in /etc/containers/registries.conf
     image: ghcr.io/ggerganov/llama.cpp:server
     restart: always
     ports:

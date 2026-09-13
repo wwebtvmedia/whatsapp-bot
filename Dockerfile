@@ -1,5 +1,6 @@
 # Stage 1: Use official Node.js 20 image
-FROM node:20
+# Fully qualified: podman refuses short names without unqualified-search-registries
+FROM docker.io/library/node:20
 
 # Set working directory inside the container
 WORKDIR /usr/src/app
