@@ -13,7 +13,8 @@ import fetch from 'node-fetch';
 import {
   queryChromaDays,
   queryChromaMessages,
-  hybridKeywordSearch
+  hybridKeywordSearch,
+  dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
 

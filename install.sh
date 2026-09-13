@@ -121,8 +121,8 @@ env_val() {
   echo "${v:-$2}"
 }
 
-# Precedence: environment variable > .env > built-in default
-OLLAMA_REMOTE="${OLLAMA_REMOTE:-$(env_val OLLAMA_URL http://192.168.1.194:11434)}"
+# Precedence: environment variable > .env > empty (local llama.cpp fallback)
+OLLAMA_REMOTE="${OLLAMA_REMOTE:-$(env_val OLLAMA_URL "")}"
 REMOTE_MODEL="${REMOTE_MODEL:-$(env_val OLLAMA_MODEL bestmodel:latest)}"
 # Fast medium 7B-class model (Q4_K_M quant, ~4.7 GB), good on CPU-only hosts
 GGUF_URL="https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"

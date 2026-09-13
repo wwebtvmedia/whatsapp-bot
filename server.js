@@ -26,6 +26,7 @@ const serverPort = process.env.SERVER_PORT;
 const embeddingUrl = process.env.EMBEDDING_URL;
 const autoReplyEnabled = process.env.AUTO_REPLY === 'true';
 const apiToken = process.env.API_TOKEN;
+if (!apiToken) console.warn('⚠️ API_TOKEN is not set — protected endpoints will reject every request');
 
 [downloadsPath, authFolder].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -147,10 +148,10 @@ const upload = multer();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Auth Middleware
+// Auth Middleware — fails closed: an unset API_TOKEN must never disable auth
 const authMiddleware = (req, res, next) => {
   const token = req.headers['x-api-token'];
-  if (token !== apiToken) {
+  if (!apiToken || token !== apiToken) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
@@ -233,16 +234,23 @@ app.post('/api/trigger-reply', authMiddleware, async (req, res) => {
   const { fromList } = req.body;
   if (!Array.isArray(fromList) || fromList.length === 0) return res.status(400).json({ error: '`fromList` must be a non-empty array of user JIDs' });
 
+  const sock = getSocket();
+  if (!sock?.user) return res.status(503).json({ error: 'WhatsApp socket not connected' });
+
   let totalReplied = 0;
 
-  for (const from of fromList) {
-    const messages = await getUnrepliedMessages(from);
-    for (const msg of messages) {
-      const replyText = await generateAutoReply(msg.messageContent);
-      await sock.sendMessage(msg.sender, { text: replyText });
-      await updateRepliedStatus(msg._id);
-      totalReplied++;
+  try {
+    for (const from of fromList) {
+      const messages = await getUnrepliedMessages(from);
+      for (const msg of messages) {
+        const replyText = await generateAutoReply(msg.messageContent);
+        await sock.sendMessage(msg.sender, { text: replyText });
+        await updateRepliedStatus(msg._id);
+        totalReplied++;
+      }
     }
+  } catch (err) {
+    return res.status(500).json({ error: 'trigger-reply failed', details: err.message, totalReplied });
   }
 
   res.json({ status: 'replied_to_multiple_users', totalReplied });

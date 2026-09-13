@@ -67,7 +67,7 @@ def download_latest_media(after_iso_date, output_file):
 # --- Example usage ---
 
 if __name__ == "__main__":
-    phone="33660253264"
+    phone=os.getenv("TEST_PHONE", "33600000000")
     message="Hello from Python with error handling!"
     check_health()
     #send_whatsapp_message(phone, message)

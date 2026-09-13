@@ -2,7 +2,6 @@
 services:
   whatsapp-bot:
     build: .
-    container_name: whatsapp-bot
     restart: always
     ports:
       - "3000:3000"
@@ -19,19 +18,17 @@ services:
 
   mongo:
     image: mongo:6
-    container_name: mongo
     restart: always
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - ./data/db:/data/db:Z
 
   chromadb:
     image: chromadb/chroma:latest
-    container_name: chromadb
     restart: always
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - CHROMA_SERVER_CORS_ALLOW_ORIGINS=http://localhost:3000
     volumes:
@@ -40,10 +37,9 @@ services:
   embeddings:
     build:
       context: ./embedding-service
-    container_name: embeddings
     restart: always
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     volumes:
       - ./embedding-service:/app:Z
     working_dir: /app
@@ -59,7 +55,6 @@ services:
     # remote Ollama server is reachable)
     profiles: ["local-llm"]
     image: ghcr.io/ggerganov/llama.cpp:server
-    container_name: llamacpp
     restart: always
     ports:
       - "8080:8080"
