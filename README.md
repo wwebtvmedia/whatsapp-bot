@@ -105,6 +105,22 @@ podman-compose logs -f whatsapp-bot
 
 ---
 
+## 🖥️ Web Panel
+
+Open `http://localhost:3000` and enter the `API_TOKEN` when prompted. The panel gives you:
+
+- **Received information** — the full journal of everything the bot receives, grouped by day, with a live filter.
+- **Proposed replies** — whenever a contact writes while auto-reply is **off** (the default), the bot still drafts an answer but does **not** send it. Drafts are listed here: review the incoming message and the drafted reply, then hit **Send** to deliver it, or leave it.
+- **Auto-reply per contact** — one checkbox per contact. Unticked (default) = drafts only; ticked = the bot answers that contact automatically.
+- **Ask the memory** — free-text questions answered from the stored memory, with the sources used.
+- **Daily summaries** — per-contact, per-day digests maintained for retrieval.
+- **Send message / media** — manual outgoing tools.
+- **Bot log** — the persistent activity log: receptions, drafted/sent replies, WhatsApp connections, errors (auto-pruned after 7 days, also available at `GET /api/logs`).
+
+A **Refresh** button and a 30 s auto-refresh cover every section.
+
+---
+
 ## 🔌 API Endpoints
 
 All API requests (except `/api/health`) require the header `x-api-token: YOUR_SECRET_TOKEN_HERE`.
