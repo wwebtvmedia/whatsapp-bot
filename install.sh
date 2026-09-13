@@ -52,8 +52,16 @@ mkdir -p models downloads auth backups data/db data/chroma embedding-service/cac
 # ---------------------------------------------------------------------------
 # 4. LLM backend: prefer the remote Ollama server, fall back to a local GGUF
 # ---------------------------------------------------------------------------
-OLLAMA_REMOTE="${OLLAMA_REMOTE:-http://192.168.1.194:11434}"
-REMOTE_MODEL="${REMOTE_MODEL:-bestmodel:latest}"
+# Read a value from .env without executing it ($2 = fallback)
+env_val() {
+  local v
+  v=$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  echo "${v:-$2}"
+}
+
+# Precedence: environment variable > .env > built-in default
+OLLAMA_REMOTE="${OLLAMA_REMOTE:-$(env_val OLLAMA_URL http://192.168.1.194:11434)}"
+REMOTE_MODEL="${REMOTE_MODEL:-$(env_val OLLAMA_MODEL bestmodel:latest)}"
 # Fast medium 7B-class model (Q4_K_M quant, ~4.7 GB), good on CPU-only hosts
 GGUF_URL="https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
 
@@ -64,7 +72,12 @@ set_llm_env() {
 }
 
 USE_LOCAL_LLM=1
-REMOTE_TAGS=$(curl -s --max-time 5 "$OLLAMA_REMOTE/api/tags" || true)
+if [ -z "$OLLAMA_REMOTE" ]; then
+  echo "ℹ️  OLLAMA_URL is empty in .env — local llama.cpp model only"
+  REMOTE_TAGS=""
+else
+  REMOTE_TAGS=$(curl -s --max-time 5 "$OLLAMA_REMOTE/api/tags" || true)
+fi
 
 if echo "$REMOTE_TAGS" | grep -q "\"name\":\"$REMOTE_MODEL\""; then
   echo "✔️  Remote Ollama found at $OLLAMA_REMOTE — using '$REMOTE_MODEL'"
