@@ -1,20 +1,22 @@
 # WhatsApp AI Bot 🤖
 
-A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB. It features automatic message storage, media downloading, semantic search (vector memory), and an AI-powered reply system.
+A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB. It stores every received message in a hierarchical memory (message + per-day digests + contact/topic graph), indexes the **content of received documents**, and answers natural-language questions about all of it.
 
 ## 🚀 Features
 
 - **WhatsApp Integration:** Powered by `@whiskeysockets/baileys`.
 - **Media Management:** Automatically downloads and organizes media files (images, videos, etc.) by sender.
-- **Semantic Memory:** Uses **ChromaDB** and a custom **Python Embedding Service** (multilingual E5 by default, configurable via `EMBEDDING_MODEL`) to store and query message context.
+- **📄 Document Understanding:** Received PDFs, Word files and text documents are extracted, chunked and indexed into the vector memory; images are OCR'd (tesseract, on by default). Ask questions about their content in plain language.
+- **Semantic Memory (GraphRAG):** Uses **ChromaDB** and a custom **Python Embedding Service** (multilingual E5 by default, configurable via `EMBEDDING_MODEL`) with hierarchical retrieval: coarse per-day digests → fine-grained messages/document chunks, plus a lexical fallback and a contact/topic **graph** (`/api/graph`).
 - **AI-Powered Replies:** Generates automated or manual replies using **Ollama** or **Llama.cpp** via an OpenAI-compatible API.
+- **📧 Email Ingestion (optional):** With `MAIL_ENABLED=true`, inbound emails land in the same memory as WhatsApp messages (IMAP listener with auto-reconnect), and `POST /api/send-email` sends mail via SMTP.
 - **Database:** Uses **MongoDB** for persistent message and metadata storage.
-- **REST API:** Control the bot, send messages/media, and query memory via a built-in Express server.
+- **REST API:** Control the bot, send messages/media/emails, and query memory via a built-in Express server.
 - **Dockerized:** Fully containerized architecture for easy deployment.
 
 ## 🛠️ Architecture
 
-- **Main Bot (Node.js):** Handles WhatsApp connection, Express API, and orchestration.
+- **Main Bot (Node.js):** Handles WhatsApp connection, document extraction, Express API, and orchestration.
 - **Embedding Service (Python/FastAPI):** Generates vector embeddings for semantic search.
 - **MongoDB:** Stores raw messages and application data.
 - **ChromaDB:** Vector database for similarity search.
@@ -32,11 +34,11 @@ A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB.
 
 ## ⚙️ Configuration
 
-1. Create a `.env` file in the root directory (use `.env.example` as a template).
-2. Configure your environment variables:
+1. Create a `.env` file in the root directory (use `.env.example` as a template — it documents every variable, including the optional ones below).
+2. Core variables:
 
 ```env
-MONGO_URL=mongodb://mongo:27017/whatsapp-bot
+MONGO_URL=mongodb://mongo:27017/mcp
 CHROMA_URL=http://chromadb:8000
 EMBEDDING_URL=http://embeddings:8001/embed
 
@@ -51,6 +53,18 @@ DOWNLOADS_PATH=./downloads
 SERVER_PORT=3000
 API_TOKEN=YOUR_SECRET_TOKEN_HERE
 ```
+
+> ℹ️ Messages are stored in the MongoDB database **`mcp`** (the name in `MONGO_URL` is informational; `initDatabase` uses its `mcp` default). Keep it in mind when browsing.
+
+**Optional features** (all documented in `.env.example`):
+
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `MEDIA_INDEXING` | `true` | Extract and index the text of received PDF/docx/text files. |
+| `MEDIA_OCR_ENABLED` | `true` | OCR received images (tesseract, `eng+fra`; downloads language data on first use). |
+| `MEDIA_MAX_CHUNKS` | `60` | Cap on indexed chunks per document (~50 pages). |
+| `MAIL_ENABLED` | `false` | Ingest inbound emails (needs `MAIL_HOST`, `MAIL_USER`, `MAIL_PASS`, `MAIL_FROM`, `MAIL_IMAP_HOST`). |
+| `DIGEST_EMBED_EVERY` / `CONTEXT_MAX_MESSAGES` | `5` / `6` | Memory tuning. |
 
 ### 🧠 LLM Setup (automatic)
 
@@ -80,7 +94,7 @@ Detects Podman or Docker automatically (installs Podman and `podman-compose` via
 podman-compose up -d --build
 
 # View logs to scan the WhatsApp QR Code
-podman logs -f whatsapp-bot
+podman-compose logs -f whatsapp-bot
 ```
 
 ### Local Development
@@ -102,8 +116,51 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | `POST` | `/api/send-media` | Send a file (multipart/form-data). |
 | `POST` | `/api/send-email` | Send an email (`MAIL_ENABLED` + SMTP config required). |
 | `GET` | `/api/get-messages` | Retrieve recent messages from MongoDB. |
+| `GET` | `/api/get-media` | Download the most recent media file (optional `?after=<ISO date>`). |
 | `POST` | `/api/query-memory` | Semantic search through message history **and received documents** (PDF/docx/text are extracted and indexed; images via optional OCR — `MEDIA_OCR_ENABLED`). |
+| `GET` | `/api/graph` | Contact/topic/mention graph built from message metadata (`?maxEdges=300`). |
 | `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs. |
+
+---
+
+## 📄 Asking Questions About Received Documents
+
+Send any document (PDF, `.docx`, text file) or image to the bot. It is downloaded, its text is extracted (OCR for images), chunked and indexed. Then just ask:
+
+- **On WhatsApp** (with `AUTO_REPLY=true`), in the same conversation:
+  > *"quel est le montant de la facture ?"*
+- **Through the API:**
+
+```bash
+TOKEN=$(grep '^API_TOKEN=' .env | cut -d= -f2)
+curl -s -X POST -H "x-api-token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"text":"quelle est la date d echeance de la facture ?"}' \
+  http://localhost:3000/api/query-memory
+```
+
+The response includes `matches` (retrieved passages), `refs` (with the day and source) and `used` (retrieval diagnostics). Mentioning the document topic or period ("hier", "la facture") helps the hierarchical retrieval.
+
+Limitations: scanned PDFs (image-only) are logged as `pdf-no-text`; audio/video are not transcribed; OCR needs internet access once to download language data.
+
+---
+
+## 🗂️ Browsing the Database
+
+```bash
+podman exec -it whatsapp-bot_mongo_1 mongosh
+```
+
+(Names may differ — check `podman ps`. With Docker Compose, use `docker compose exec mongo mongosh`.)
+
+```js
+use mcp                       // ← the database name
+db.messages.find().sort({ timestamp: -1 }).limit(5)   // latest messages
+db.messages.find({ "media.indexedChunks": { $gt: 0 } }) // indexed documents (media.extractedText = preview)
+db.daily_digests.find()       // per-contact daily summaries
+db.graph_edges.find().sort({ weight: -1 }).limit(10)
+```
+
+**MongoDB Compass** also works on `mongodb://localhost:27017` (the port is bound to `127.0.0.1` only).
 
 ---
 
