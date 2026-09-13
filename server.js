@@ -12,6 +12,7 @@ import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessage
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
 import { searchMemory, embedText } from './memorySearch.js';
+import { startMailListener, sendMail } from './MailConnection.js';
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ const authFolder = process.env.WHATSAPP_AUTH_PATH;
 const serverPort = process.env.SERVER_PORT;
 const embeddingUrl = process.env.EMBEDDING_URL;
 const autoReplyEnabled = process.env.AUTO_REPLY === 'true';
+const mailEnabled = process.env.MAIL_ENABLED === 'true';
 const apiToken = process.env.API_TOKEN;
 if (!apiToken) console.warn('⚠️ API_TOKEN is not set — protected endpoints will reject every request');
 
@@ -34,6 +36,76 @@ if (!apiToken) console.warn('⚠️ API_TOKEN is not set — protected endpoints
 
 // Mongo & Chroma setup
 await initDatabase(mongoUrl, chromaUrl);
+
+// Shared ingestion pipeline: classify → Mongo → graph → embeddings → Chroma.
+// Used for both WhatsApp messages and emails (unified message schema).
+async function ingestMessage({ sender, messageContent, timestamp, messageId, messageType, media = null }) {
+  const text = messageContent !== 'No text' ? messageContent : '';
+  const { subject, infoType, entities } = classifyMessage(text);
+  const day = dayKey(timestamp instanceof Date ? timestamp : new Date(Number(timestamp) * 1000));
+
+  const savedId = await saveMessage({
+    sender,
+    messageContent,
+    timestamp,
+    messageId,
+    messageType,
+    subject,
+    infoType,
+    entities,
+    media
+  });
+
+  const ref = savedId.toString();
+
+  // Graph edges, built purely from metadata (no LLM calls)
+  await upsertGraphEdge({ from: sender, edge: 'sent', to: subject, ref });
+  const mentioned = [
+    ...(entities?.phones || []),
+    ...(entities?.emails || []),
+    ...(entities?.urls || [])
+  ];
+  for (const target of new Set(mentioned)) {
+    await upsertGraphEdge({ from: sender, edge: 'mentions', to: target, ref });
+  }
+
+  // Two-level vector index: the message itself + its per-day digest
+  let embedding = null;
+  try {
+    embedding = await embedText(text || `[media] ${messageType}`);
+  } catch (err) {
+    console.error('❌ Embedding failed:', err.message);
+  }
+
+  if (embedding) {
+    await upsertChromaMessage(messageId, messageContent, embedding, {
+      sender, subject, info_type: infoType, day, ref
+    });
+
+    // Coarse level: refresh the day-digest embedding periodically
+    const digest = await upsertDailyDigest({
+      key: `${sender}|${day}`,
+      sender,
+      day,
+      subject,
+      text: `${messageType === 'text' ? '' : `[${messageType}] `}${messageContent}`
+    });
+    const embedEvery = Math.max(1, parseInt(process.env.DIGEST_EMBED_EVERY || '5', 10));
+    if (digest && digest.count % embedEvery === 1) {
+      try {
+        const digestText = (digest.texts || []).slice(-40).join('\n');
+        const digestEmbedding = await embedText(digestText);
+        await upsertChromaDay(`day:${sender}:${day}`, digestText, digestEmbedding, {
+          sender, day, subjects: digest.subjects || [subject]
+        });
+      } catch (err) {
+        console.error('❌ Digest embedding failed:', err.message);
+      }
+    }
+  }
+
+  return savedId;
+}
 
 // WhatsApp setup
 await startWhatsApp(authFolder, async ({ messages, type }) => {
@@ -60,69 +132,14 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     const fileName = `${messageId}.${extension}`;
     const filePath = path.join(senderFolder, fileName);
 
-    // Classify first (zero-cost): subject, info type and entities for the graph
-    const { subject, infoType, entities } = classifyMessage(messageContent !== 'No text' ? messageContent : '');
-    const day = dayKey(new Date(Number(timestamp) * 1000));
-
-    const savedId = await saveMessage({
-      jid,
+    const savedId = await ingestMessage({
+      sender: jid,
       messageContent,
       timestamp,
       messageId,
       messageType,
-      subject,
-      infoType,
-      entities,
       media: isMedia ? { filePath, fileName } : null
     });
-
-    const ref = savedId.toString();
-
-    // Graph edges, built purely from metadata (no LLM calls)
-    await upsertGraphEdge({ from: jid, edge: 'sent', to: subject, ref });
-    const mentioned = [
-      ...(entities?.phones || []),
-      ...(entities?.emails || []),
-      ...(entities?.urls || [])
-    ];
-    for (const target of new Set(mentioned)) {
-      await upsertGraphEdge({ from: jid, edge: 'mentions', to: target, ref });
-    }
-
-    // Two-level vector index: the message itself + its per-day digest
-    let embedding = null;
-    try {
-      embedding = await embedText(messageContent !== 'No text' ? messageContent : `[media] ${messageType}`);
-    } catch (err) {
-      console.error('❌ Embedding failed:', err.message);
-    }
-
-    if (embedding) {
-      await upsertChromaMessage(messageId, messageContent, embedding, {
-        sender: jid, subject, info_type: infoType, day, ref
-      });
-
-      // Coarse level: refresh the day-digest embedding periodically
-      const digest = await upsertDailyDigest({
-        key: `${jid}|${day}`,
-        sender: jid,
-        day,
-        subject,
-        text: `${messageType === 'text' ? '' : `[${messageType}] `}${messageContent}`
-      });
-      const embedEvery = Math.max(1, parseInt(process.env.DIGEST_EMBED_EVERY || '5', 10));
-      if (digest && digest.count % embedEvery === 1) {
-        try {
-          const digestText = (digest.texts || []).slice(-40).join('\n');
-          const digestEmbedding = await embedText(digestText);
-          await upsertChromaDay(`day:${jid}:${day}`, digestText, digestEmbedding, {
-            sender: jid, day, subjects: digest.subjects || [subject]
-          });
-        } catch (err) {
-          console.error('❌ Digest embedding failed:', err.message);
-        }
-      }
-    }
 
     // Auto reply if enabled
     if (autoReplyEnabled && messageContent && messageContent !== 'No text') {
@@ -141,6 +158,27 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
   }
 });
+
+// Mail ingestion (opt-in: MAIL_ENABLED=true) — emails land in the same memory
+if (mailEnabled) {
+  if (!process.env.MAIL_USER || !process.env.MAIL_IMAP_HOST) {
+    console.warn('⚠️ MAIL_ENABLED=true but MAIL_USER / MAIL_IMAP_HOST are missing — mail ingestion skipped');
+  } else {
+    startMailListener(async (mail) => {
+      try {
+        await ingestMessage({
+          sender: mail.sender,
+          messageContent: mail.messageContent,
+          timestamp: mail.timestamp,
+          messageId: mail.messageId,
+          messageType: mail.messageType
+        });
+      } catch (err) {
+        console.error('❌ Email ingestion failed:', err.message);
+      }
+    });
+  }
+}
 
 // Express API setup
 const app = express();
@@ -184,6 +222,17 @@ app.post('/api/send-media', authMiddleware, upload.single('file'), async (req, r
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/send-email', authMiddleware, async (req, res) => {
+  const { to, subject, text, html } = req.body;
+  if (!to || (!text && !html)) return res.status(400).json({ error: 'Missing "to" and "text"/"html" fields' });
+  try {
+    const info = await sendMail({ to, subject, text, html });
+    res.json({ status: 'sent', messageId: info.messageId });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to send email', details: err.message });
   }
 });
 

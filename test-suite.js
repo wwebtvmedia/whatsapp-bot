@@ -45,6 +45,18 @@ test('Email Filter: should correctly standardize an email', () => {
   assert.strictEqual(filtered.messageType, 'email');
 });
 
+test('Email Filter: should strip HTML when no plain-text part exists', () => {
+  const parsedEmail = {
+    from: { value: [{ address: 'test@example.com' }] },
+    html: '<html><head><style>p { color: red }</style></head><body><p>Hello <b>HTML</b> world</p></body></html>',
+    date: new Date('2024-01-01T10:00:00Z'),
+    messageId: 'email-id-html'
+  };
+
+  const filtered = filterEmailToStandardMessage(parsedEmail);
+  assert.strictEqual(filtered.messageContent, 'Hello HTML world');
+});
+
 // 3. Test LLM Logic (Formatting)
 test('LLM Logic: should handle openai-compatible (llama.cpp) formatting', async (t) => {
     // Mocking environment for this test

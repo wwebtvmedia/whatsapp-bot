@@ -100,6 +100,7 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | `GET` | `/api/health` | Check bot status and user info. |
 | `POST` | `/api/send-message` | Send a text message. |
 | `POST` | `/api/send-media` | Send a file (multipart/form-data). |
+| `POST` | `/api/send-email` | Send an email (`MAIL_ENABLED` + SMTP config required). |
 | `GET` | `/api/get-messages` | Retrieve recent messages from MongoDB. |
 | `POST` | `/api/query-memory` | Semantic search through message history. |
 | `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs. |
