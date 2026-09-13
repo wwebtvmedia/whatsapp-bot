@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 
-import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted } from './storage/database.js';
+import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
@@ -254,9 +254,17 @@ app.post('/api/send-email', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/get-messages', authMiddleware, async (_, res) => {
-  const messages = await getRecentMessages();
+app.get('/api/get-messages', authMiddleware, async (req, res) => {
+  const parsed = parseInt(req.query.limit || '20', 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : 20;
+  const messages = await getRecentMessages(limit);
   res.json(messages);
+});
+
+app.get('/api/digests', authMiddleware, async (req, res) => {
+  const parsed = parseInt(req.query.limit || '50', 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : 50;
+  res.json(await getDailyDigests(limit));
 });
 
 app.get('/api/get-media', authMiddleware, async (req, res) => {

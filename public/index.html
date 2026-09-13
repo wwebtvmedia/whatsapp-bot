@@ -3,76 +3,344 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>WhatsApp MCP</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WhatsApp Bot — Control Panel</title>
   <style>
-    body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; }
-    h2 { border-bottom: 1px solid #ccc; padding-bottom: .5rem; }
-    input, textarea { width: 100%; margin: .5rem 0; padding: .5rem; }
-    button { padding: .5rem 1rem; }
-    .log { background: #f5f5f5; padding: 1rem; margin-top: 1rem; white-space: pre-wrap; }
+    /* Journal theme: paper register, pine ink, WhatsApp-teal accents.
+       System faces only — the panel must work without internet. */
+    :root {
+      --paper: #F6F5F1;
+      --card: #FFFFFF;
+      --ink: #1C2B27;
+      --muted: #66736D;
+      --line: #E4E1D6;
+      --teal: #0E7A6C;
+      --teal-soft: #E2F0ED;
+      --amber: #96690F;
+      --amber-soft: #F6EDD8;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: var(--sans);
+      background: var(--paper);
+      color: var(--ink);
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 4rem;
+      line-height: 1.45;
+    }
+    :focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+    header.panel-head {
+      display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+      border-bottom: 2px solid var(--ink); padding-bottom: .6rem; margin-bottom: 1.25rem;
+    }
+    header.panel-head h1 { font-size: 1.15rem; margin: 0; letter-spacing: -0.01em; }
+    header.panel-head .tagline { color: var(--muted); font-size: .85rem; }
+    #conn-state { margin-left: auto; font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+    #conn-state .dot { display: inline-block; width: .55em; height: .55em; border-radius: 50%; background: var(--line); margin-right: .35em; }
+    #conn-state.ok .dot { background: var(--teal); }
+    #conn-state.down .dot { background: #B3402E; }
+
+    section { margin-bottom: 2rem; }
+    h2 {
+      font-family: var(--mono); font-size: .75rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .12em; color: var(--muted);
+      display: flex; align-items: center; gap: .75rem; margin: 0 0 .8rem;
+    }
+    h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+    h2 button { font: inherit; letter-spacing: normal; text-transform: none; }
+
+    .toolbar { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .8rem; }
+    .toolbar input[type="text"] { flex: 1; min-width: 180px; margin: 0; }
+    label.auto { font-size: .85rem; color: var(--muted); display: flex; gap: .35rem; align-items: center; }
+
+    input, textarea, button, select {
+      font-family: inherit; font-size: .92rem; border-radius: 6px;
+    }
+    input[type="text"], input[type="file"], textarea {
+      border: 1px solid var(--line); background: var(--card); padding: .45rem .6rem; width: 100%;
+    }
+    button {
+      background: var(--card); border: 1px solid var(--line); color: var(--ink);
+      padding: .45rem .9rem; cursor: pointer; transition: border-color .15s;
+    }
+    button:hover { border-color: var(--teal); }
+    button.primary { background: var(--teal); border-color: var(--teal); color: #fff; }
+
+    /* --- Journal: day-rail timeline --- */
+    .day-sep {
+      display: flex; align-items: center; gap: .75rem; margin: 1.1rem 0 .5rem;
+      font-family: var(--mono); font-size: .72rem; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .day-sep::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+    .entry {
+      display: grid; grid-template-columns: 3.4rem 1fr; gap: .2rem .8rem;
+      padding: .45rem 0; border-bottom: 1px dashed var(--line);
+    }
+    .entry time {
+      font-family: var(--mono); font-size: .8rem; color: var(--muted); padding-top: .15rem;
+    }
+    .entry .who { display: flex; gap: .4rem; flex-wrap: wrap; align-items: baseline; }
+    .entry .who .sender { font-family: var(--mono); font-size: .82rem; font-weight: 600; }
+    .entry .body { grid-column: 2; font-size: .92rem; overflow-wrap: anywhere; }
+    .ticks { color: var(--teal); font-size: .8rem; letter-spacing: -.08em; margin-left: .3rem; }
+    .chip {
+      display: inline-block; font-size: .7rem; font-family: var(--mono);
+      padding: .05rem .45rem; border-radius: 99px; background: var(--teal-soft); color: var(--teal);
+    }
+    .chip.type { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+    .chip.doc { background: var(--amber-soft); color: var(--amber); }
+    .card-dead { grid-column: 2; }
+
+    /* --- Daily summaries --- */
+    .digests { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .7rem; }
+    .digest {
+      background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .7rem .8rem;
+    }
+    .digest .d-day { font-family: var(--mono); font-size: .72rem; color: var(--amber); text-transform: uppercase; letter-spacing: .08em; }
+    .digest .d-sender { font-family: var(--mono); font-size: .82rem; font-weight: 600; margin: .15rem 0 .3rem; overflow-wrap: anywhere; }
+    .digest .d-meta { font-size: .78rem; color: var(--muted); }
+    .digest .d-preview { font-size: .85rem; margin-top: .35rem; color: var(--ink); }
+    .digest .chips { margin-top: .4rem; display: flex; gap: .3rem; flex-wrap: wrap; }
+
+    .log {
+      background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+      padding: .8rem; margin-top: .5rem; white-space: pre-wrap; font-size: .88rem;
+      overflow-wrap: anywhere;
+    }
+    .empty { color: var(--muted); font-size: .9rem; padding: .8rem 0; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } .entry { grid-template-columns: 2.9rem 1fr; } }
+    label.field { display: block; font-size: .8rem; color: var(--muted); margin: .5rem 0 .15rem; }
   </style>
 </head>
 <body>
-  <h1>📲 WhatsApp Bot Control Panel</h1>
+  <header class="panel-head">
+    <h1>WhatsApp Bot</h1>
+    <span class="tagline">control panel &amp; journal</span>
+    <span id="conn-state"><span class="dot"></span>checking…</span>
+  </header>
 
-  <h2>Health Check</h2>
-  <button onclick="checkHealth()">Check</button>
-  <div id="health-status" class="log"></div>
+  <section>
+    <h2>Received information
+      <button onclick="loadJournal()" title="Reload from the bot memory">Refresh</button>
+      <label class="auto"><input type="checkbox" id="auto-refresh" onchange="toggleAuto()" /> auto 30s</label>
+    </h2>
+    <div class="toolbar">
+      <input type="text" id="journal-filter" placeholder="Filter by sender, subject or content…" oninput="renderJournal()" />
+    </div>
+    <div id="journal" class="empty">Loading…</div>
+  </section>
 
-  <h2>Send Message</h2>
-  <input type="text" id="send-to" placeholder="Phone (e.g. 123456789@s.whatsapp.net)" />
-  <textarea id="send-text" placeholder="Your message here..."></textarea>
-  <button onclick="sendMessage()">Send</button>
-  <div id="send-status" class="log"></div>
+  <section>
+    <h2>Daily summaries</h2>
+    <div id="digests" class="empty">Loading…</div>
+  </section>
 
-  <h2>Send Media</h2>
-  <input type="text" id="media-number" placeholder="Phone (e.g. 123456789@s.whatsapp.net)" />
-  <input type="file" id="media-file" />
-  <button onclick="sendMedia()">Upload</button>
-  <div id="media-status" class="log"></div>
+  <section class="grid2">
+    <div>
+      <h2>Send message</h2>
+      <label class="field" for="send-to">To (WhatsApp JID)</label>
+      <input type="text" id="send-to" placeholder="33612345678@s.whatsapp.net" />
+      <label class="field" for="send-text">Message</label>
+      <textarea id="send-text" rows="3" placeholder="Your message…"></textarea>
+      <p><button class="primary" onclick="sendMessage()">Send</button></p>
+      <div id="send-status" class="log" hidden></div>
+    </div>
+    <div>
+      <h2>Send media</h2>
+      <label class="field" for="media-number">To (WhatsApp JID)</label>
+      <input type="text" id="media-number" placeholder="33612345678@s.whatsapp.net" />
+      <label class="field" for="media-file">File</label>
+      <input type="file" id="media-file" />
+      <p><button class="primary" onclick="sendMedia()">Upload</button></p>
+      <div id="media-status" class="log" hidden></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Connection</h2>
+    <button onclick="checkHealth()">Check WhatsApp link</button>
+    <div id="health-status" class="log" hidden></div>
+  </section>
 
   <script>
     // Protected endpoints require the x-api-token header; ask once per session.
-    const apiToken = sessionStorage.getItem('apiToken') || prompt('Enter API token:');
+    let apiToken = sessionStorage.getItem('apiToken') || prompt('Enter API token:');
     sessionStorage.setItem('apiToken', apiToken);
-    const authHeaders = { 'x-api-token': apiToken };
+    const authHeaders = () => ({ 'x-api-token': apiToken });
 
-    async function checkHealth() {
-      const res = await fetch('/api/health');
-      const data = await res.json();
-      document.getElementById('health-status').textContent = JSON.stringify(data, null, 2);
+    async function fetchAuth(url, opts = {}) {
+      const res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
+      if (res.status === 401 && apiToken !== null) {
+        // Wrong token: ask again once, then retry a single time.
+        apiToken = prompt('Unauthorized — API token:');
+        sessionStorage.setItem('apiToken', apiToken);
+        return fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
+      }
+      return res;
     }
 
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const timeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+    const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+    const localDayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    function dayLabel(d) {
+      const today = localDayKey(new Date());
+      const yest = localDayKey(new Date(Date.now() - 864e5));
+      if (localDayKey(d) === today) return 'Today';
+      if (localDayKey(d) === yest) return 'Yesterday';
+      return dayFmt.format(d);
+    }
+
+    // --- Connection state ---
+    async function checkHealth(quiet = false) {
+      const el = document.getElementById('health-status');
+      const state = document.getElementById('conn-state');
+      try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        state.className = res.ok ? 'ok' : 'down';
+        state.innerHTML = `<span class="dot"></span>${res.ok ? 'connected' : 'disconnected'}`;
+        if (!quiet) { el.hidden = false; el.textContent = JSON.stringify(data, null, 2); }
+      } catch {
+        state.className = 'down';
+        state.innerHTML = '<span class="dot"></span>unreachable';
+        if (!quiet) { el.hidden = false; el.textContent = 'The bot is not reachable on this address.'; }
+      }
+    }
+
+    // --- Journal: everything received, grouped by day ---
+    const journal = { messages: [], digests: [] };
+
+    async function loadJournal() {
+      const el = document.getElementById('journal');
+      const dEl = document.getElementById('digests');
+      try {
+        const [msgRes, digRes] = await Promise.all([
+          fetchAuth('/api/get-messages?limit=100'),
+          fetchAuth('/api/digests?limit=50')
+        ]);
+        if (!msgRes.ok || !digRes.ok) throw new Error('HTTP ' + msgRes.status);
+        journal.messages = await msgRes.json();
+        journal.digests = await digRes.json();
+        renderJournal();
+        renderDigests();
+        checkHealth(true);
+      } catch (err) {
+        el.className = 'empty';
+        el.textContent = 'Could not load the journal (' + err.message + '). Check that the bot is running and the token is valid.';
+        dEl.textContent = '';
+      }
+    }
+
+    function renderJournal() {
+      const el = document.getElementById('journal');
+      const q = document.getElementById('journal-filter').value.trim().toLowerCase();
+      const items = journal.messages.filter(m => !q ||
+        [m.sender, m.subject, m.infoType, m.messageContent, m.media?.fileName]
+          .some(v => String(v ?? '').toLowerCase().includes(q)));
+
+      if (!journal.messages.length) {
+        el.className = 'empty';
+        el.textContent = 'No messages yet — entries appear here as contacts write to the bot.';
+        return;
+      }
+      if (!items.length) {
+        el.className = 'empty';
+        el.textContent = 'Nothing matches this filter.';
+        return;
+      }
+      el.className = '';
+      let html = '';
+      let lastDay = '';
+      for (const m of items) {
+        const d = new Date(m.timestamp);
+        const dayKey = localDayKey(d);
+        if (dayKey !== lastDay) {
+          lastDay = dayKey;
+          html += `<div class="day-sep">${esc(dayLabel(d))}</div>`;
+        }
+        const chips = [
+          m.subject ? `<span class="chip">${esc(m.subject)}</span>` : '',
+          m.infoType ? `<span class="chip type">${esc(m.infoType)}</span>` : '',
+          m.media?.fileName ? `<span class="chip doc">📎 ${esc(m.media.fileName)}</span>` : '',
+          m.media?.indexedChunks > 0 ? `<span class="chip doc">📄 ${m.media.indexedChunks} chunks indexed</span>` : ''
+        ].filter(Boolean).join(' ');
+        const ticks = m.replied ? '<span class="ticks" title="AI replied">✓✓</span>' : '';
+        html += `<div class="entry">
+          <time>${esc(timeFmt.format(d))}</time>
+          <div class="who"><span class="sender">${esc(m.sender)}</span>${ticks}${chips}</div>
+          <div class="body">${esc(m.messageContent)}</div>
+        </div>`;
+      }
+      el.innerHTML = html;
+    }
+
+    function renderDigests() {
+      const el = document.getElementById('digests');
+      if (!journal.digests.length) {
+        el.className = 'empty';
+        el.textContent = 'Summaries appear once the bot has processed a full day of messages.';
+        return;
+      }
+      el.className = 'digests';
+      el.innerHTML = journal.digests.map(g => {
+        const subjects = (g.subjects || []).map(s => `<span class="chip">${esc(s)}</span>`).join(' ');
+        const preview = (g.texts || []).slice(-1)[0] || '';
+        return `<div class="digest">
+          <div class="d-day">${esc(g.day)}</div>
+          <div class="d-sender">${esc(g.sender)}</div>
+          <div class="d-meta">${g.count ?? '?'} message(s)</div>
+          <div class="d-preview">${esc(preview.length > 140 ? preview.slice(0, 140) + '…' : preview)}</div>
+          <div class="chips">${subjects}</div>
+        </div>`;
+      }).join('');
+    }
+
+    let autoTimer = null;
+    function toggleAuto() {
+      if (document.getElementById('auto-refresh').checked) {
+        autoTimer = setInterval(loadJournal, 30000);
+        loadJournal();
+      } else if (autoTimer) {
+        clearInterval(autoTimer);
+        autoTimer = null;
+      }
+    }
+
+    // --- Send tools ---
     async function sendMessage() {
+      const el = document.getElementById('send-status');
       const to = document.getElementById('send-to').value;
       const message = document.getElementById('send-text').value;
-
-      const res = await fetch('/api/send-message', {
+      const res = await fetchAuth('/api/send-message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ to, message })
       });
-
-      const data = await res.json();
-      document.getElementById('send-status').textContent = JSON.stringify(data, null, 2);
+      el.hidden = false;
+      el.textContent = JSON.stringify(await res.json(), null, 2);
     }
 
     async function sendMedia() {
+      const el = document.getElementById('media-status');
       const number = document.getElementById('media-number').value;
       const fileInput = document.getElementById('media-file');
       const formData = new FormData();
       formData.append('file', fileInput.files[0]);
       formData.append('number', number);
-
-      const res = await fetch('/api/send-media', {
-        method: 'POST',
-        headers: authHeaders,
-        body: formData
-      });
-
-      const data = await res.json();
-      document.getElementById('media-status').textContent = JSON.stringify(data, null, 2);
+      const res = await fetchAuth('/api/send-media', { method: 'POST', headers: authHeaders(), body: formData });
+      el.hidden = false;
+      el.textContent = JSON.stringify(await res.json(), null, 2);
     }
+
+    loadJournal();
   </script>
 </body>
 </html>

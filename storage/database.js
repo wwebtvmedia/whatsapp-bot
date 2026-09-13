@@ -194,6 +194,17 @@ export async function getDailyDigest(key) {
   return digestCollection.findOne({ key });
 }
 
+// Recent per-contact daily summaries, newest activity first (for the panel)
+export async function getDailyDigests(limit = 50) {
+  try {
+    if (!digestCollection) throw new Error("MongoDB not initialized");
+    return await digestCollection.find().sort({ updatedAt: -1 }).limit(limit).toArray();
+  } catch (err) {
+    console.error('❌ Failed to get daily digests:', err);
+    return [];
+  }
+}
+
 // --- Graph edges: zero-cost graph material, built from metadata only ---
 
 export async function upsertGraphEdge({ from, edge, to, ref }) {
