@@ -13,12 +13,9 @@
     "@whiskeysockets/baileys": "^6.7.1",
     "qrcode-terminal": "^0.12.0",
     "mongodb": "^5.7.0",
-    "mongoose": "^6.0.0",
-    "qrcode": "^1.5.2",
     "express": "^4.17.1",
     "mime-types": "^2.1.35",
     "multer": "^2.0.2",
-    "axios": "^0.21.1",
     "dotenv": "^16.0.0",
     "node-fetch": "^3.3.2",
     "chromadb": "^2.3.0"
