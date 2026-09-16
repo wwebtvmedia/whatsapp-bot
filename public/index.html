@@ -151,6 +151,24 @@
     .sources { font-family: var(--mono); font-size: .78rem; color: var(--muted); padding: .5rem 0 0; }
     .sources div { padding: .15rem 0; overflow-wrap: anywhere; }
     .sources .src-doc { color: var(--amber); }
+
+    /* --- Documents parsed into the RAG --- */
+    select {
+      border: 1px solid var(--line); background: var(--card); padding: .45rem .6rem;
+      font-family: var(--mono); font-size: .85rem;
+    }
+    .doc-select { max-width: 280px; }
+    .doc-row { padding: .45rem 0; border-bottom: 1px dashed var(--line); font-size: .9rem; }
+    .doc-line { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    .doc-line .doc-name { font-family: var(--mono); font-size: .84rem; font-weight: 600; overflow-wrap: anywhere; }
+    .doc-line .doc-meta { margin-left: auto; font-family: var(--mono); font-size: .75rem; color: var(--muted); white-space: nowrap; }
+    .doc-line button { font-size: .78rem; padding: .15rem .6rem; }
+    .doc-preview summary { cursor: pointer; font-size: .78rem; color: var(--muted); }
+    .doc-preview .doc-preview-text {
+      font-size: .82rem; color: var(--muted); white-space: pre-wrap;
+      overflow-wrap: anywhere; padding: .25rem 0 0 .9rem;
+    }
+
     details { margin-top: .5rem; }
     details summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
 
@@ -208,6 +226,24 @@
         <div id="ask-sources" class="sources"></div>
       </details>
     </div>
+  </section>
+
+  <section>
+    <h2>Documents (RAG) <span id="documents-count" class="chip type"></span></h2>
+    <p class="section-hint">Every document received was parsed and stored in the vector memory. Ask a question about all of them, or pick one below.</p>
+    <div class="toolbar">
+      <input type="text" id="doc-ask-text" placeholder="e.g. what is the due date on the invoice?" onkeydown="if(event.key==='Enter')askDocuments()" />
+      <select id="doc-select" class="doc-select"><option value="">All documents</option></select>
+      <button class="primary" id="doc-ask-btn" onclick="askDocuments()">Ask</button>
+    </div>
+    <div id="doc-ask-result" hidden>
+      <div class="answer" id="doc-ask-answer"></div>
+      <details id="doc-ask-details">
+        <summary>Sources used</summary>
+        <div id="doc-ask-sources" class="sources"></div>
+      </details>
+    </div>
+    <div id="documents" class="empty">Loading…</div>
   </section>
 
   <section>
@@ -296,8 +332,8 @@
 
     // --- Journal: everything received, grouped by day ---
     const journal = { messages: [], digests: [] };
-    // Panel state: auto-reply toggles, drafted replies, bot activity log
-    const panel = { contacts: [], proposals: [], logs: [] };
+    // Panel state: auto-reply toggles, drafted replies, bot activity log, RAG documents
+    const panel = { contacts: [], proposals: [], logs: [], documents: [] };
     // True while a toggle/send is in flight: the refresh must not re-render
     // those sections, or the control the user just clicked disappears
     let contactsBusy = false;
@@ -307,12 +343,13 @@
       const el = document.getElementById('journal');
       const dEl = document.getElementById('digests');
       try {
-        const [msgRes, digRes, conRes, propRes, logRes] = await Promise.all([
+        const [msgRes, digRes, conRes, propRes, logRes, docRes] = await Promise.all([
           fetchAuth('/api/get-messages?limit=100'),
           fetchAuth('/api/digests?limit=50'),
           fetchAuth('/api/contacts'),
           fetchAuth('/api/proposed-replies?limit=50'),
-          fetchAuth('/api/logs?limit=150')
+          fetchAuth('/api/logs?limit=150'),
+          fetchAuth('/api/documents?limit=100')
         ]);
         if (!msgRes.ok || !digRes.ok) throw new Error('HTTP ' + msgRes.status);
         journal.messages = await msgRes.json();
@@ -321,11 +358,13 @@
         panel.contacts = conRes.ok ? await conRes.json() : [];
         panel.proposals = propRes.ok ? await propRes.json() : [];
         panel.logs = logRes.ok ? await logRes.json() : [];
+        panel.documents = docRes.ok ? await docRes.json() : [];
         renderJournal();
         renderDigests();
         if (!contactsBusy) renderContacts();
         if (!proposalsBusy) renderProposals();
         renderLogs();
+        renderDocuments();
         checkHealth(true);
       } catch (err) {
         el.className = 'empty';
@@ -498,6 +537,12 @@
     }
 
     // --- Ask the memory: question → retrieval + LLM answer ---
+    function renderSources(sourcesEl, refs) {
+      sourcesEl.innerHTML = refs.length
+        ? refs.map(r => `<div>${esc(r.day || '????-??-??')} · ${esc(r.sender || '?')}${r.doc ? ` · <span class="src-doc">📄 ${esc(r.doc)}</span>` : ''} · ${esc(r.source || '?')}</div>`).join('')
+        : '<div>No matching passage found for this question.</div>';
+    }
+
     async function askMemory() {
       const text = document.getElementById('ask-text').value.trim();
       const sender = document.getElementById('ask-sender').value.trim();
@@ -522,10 +567,87 @@
         });
         const data = await res.json();
         answerEl.textContent = data.answer || data.error || 'No answer returned.';
-        const refs = data.refs || [];
-        sourcesEl.innerHTML = refs.length
-          ? refs.map(r => `<div>${esc(r.day || '????-??-??')} · ${esc(r.sender || '?')}${r.doc ? ` · <span class="src-doc">📄 ${esc(r.doc)}</span>` : ''} · ${esc(r.source || '?')}</div>`).join('')
-          : '<div>No matching passage found for this question.</div>';
+        renderSources(sourcesEl, data.refs || []);
+      } catch (err) {
+        answerEl.textContent = 'Request failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Ask';
+      }
+    }
+
+    // --- Documents (RAG): parsed documents list + questions scoped to them ---
+    function renderDocuments() {
+      const el = document.getElementById('documents');
+      const count = document.getElementById('documents-count');
+      const select = document.getElementById('doc-select');
+      const docs = panel.documents;
+      const indexed = docs.filter(d => (d.media?.indexedChunks || 0) > 0).length;
+      count.textContent = docs.length ? `${indexed} indexed / ${docs.length}` : '';
+
+      // Rebuild the picker, keeping the user's current choice across refreshes
+      const prev = select.value;
+      select.innerHTML = '<option value="">All documents</option>' +
+        docs.map(d => `<option value="${esc(d.media?.fileName || '')}">${esc(d.media?.fileName || '?')}</option>`).join('');
+      if ([...select.options].some(o => o.value === prev)) select.value = prev;
+
+      if (!docs.length) {
+        el.className = 'empty';
+        el.textContent = 'Documents land here as contacts send PDFs, Word or text files to the bot.';
+        return;
+      }
+      el.className = '';
+      el.innerHTML = docs.map((d, i) => {
+        const chunks = d.media?.indexedChunks || 0;
+        const status = chunks > 0 ? `<span class="chip doc">📄 ${chunks} chunks indexed</span>`
+          : d.media?.extractedText !== undefined ? '<span class="chip warn">no text found</span>'
+          : '<span class="chip type">not parsed yet</span>';
+        const preview = (d.media?.extractedText || '').trim();
+        return `<div class="doc-row">
+          <div class="doc-line">
+            <span class="doc-name">📄 ${esc(d.media?.fileName || '?')}</span>
+            ${status}
+            <span class="doc-meta">${esc(d.sender)} · ${esc(String(d.timestamp || '').slice(0, 10))}</span>
+            <button onclick="focusDocument(${i})" title="Ask only this document">Ask</button>
+          </div>
+          ${preview ? `<details class="doc-preview"><summary>extracted text</summary><div class="doc-preview-text">${esc(preview)}</div></details>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    function focusDocument(index) {
+      const select = document.getElementById('doc-select');
+      if (select.options[Number(index) + 1]) select.selectedIndex = Number(index) + 1;
+      document.getElementById('doc-ask-text').focus();
+    }
+
+    async function askDocuments() {
+      const text = document.getElementById('doc-ask-text').value.trim();
+      const doc = document.getElementById('doc-select').value;
+      const btn = document.getElementById('doc-ask-btn');
+      const box = document.getElementById('doc-ask-result');
+      const answerEl = document.getElementById('doc-ask-answer');
+      const sourcesEl = document.getElementById('doc-ask-sources');
+      if (!text) { box.hidden = false; answerEl.textContent = 'Type a question first.'; return; }
+
+      btn.disabled = true;
+      btn.textContent = 'Searching…';
+      box.hidden = false;
+      answerEl.textContent = doc
+        ? `Searching “${doc}” and generating an answer — this can take a few seconds.`
+        : 'Searching the parsed documents and generating an answer — this can take a few seconds.';
+      sourcesEl.textContent = '';
+      document.getElementById('doc-ask-details').open = false;
+
+      try {
+        const res = await fetchAuth('/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, scope: 'documents', doc: doc || undefined })
+        });
+        const data = await res.json();
+        answerEl.textContent = data.answer || data.error || 'No answer returned.';
+        renderSources(sourcesEl, data.refs || []);
       } catch (err) {
         answerEl.textContent = 'Request failed: ' + err.message;
       } finally {

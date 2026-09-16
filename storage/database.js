@@ -290,19 +290,24 @@ export async function getGraph(maxEdges = 300) {
 
 // --- Hybrid keyword fallback (lexical search in MongoDB) ---
 
+// Lexical queries keep meaningful words only (>= 4 chars), capped at 5
+function queryWords(query) {
+  return [...new Set(
+    query.toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 4)
+  )].slice(0, 5);
+}
+
+const escapeRegex = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 export async function hybridKeywordSearch(query, limit = 6) {
   try {
     if (!messageCollection) throw new Error("MongoDB not initialized");
-    const words = [...new Set(
-      query.toLowerCase()
-        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-        .split(/\s+/)
-        .filter(w => w.length >= 4)
-    )].slice(0, 5);
-
+    const words = queryWords(query);
     if (words.length === 0) return [];
-    const escaped = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    const regex = new RegExp(escaped.join('|'), 'i');
+    const regex = new RegExp(words.map(escapeRegex).join('|'), 'i');
     return await messageCollection
       .find({ messageContent: { $regex: regex } })
       .sort({ timestamp: -1 })
@@ -310,6 +315,27 @@ export async function hybridKeywordSearch(query, limit = 6) {
       .toArray();
   } catch (err) {
     console.error('❌ Hybrid keyword search failed:', err);
+    return [];
+  }
+}
+
+// Same lexical fallback, restricted to the text extracted from the documents
+// stored in the RAG (`doc` = media.fileName narrows it to a single file)
+export async function hybridDocumentSearch(query, doc = null, limit = 6) {
+  try {
+    if (!messageCollection) throw new Error("MongoDB not initialized");
+    const words = queryWords(query);
+    if (words.length === 0) return [];
+    const regex = new RegExp(words.map(escapeRegex).join('|'), 'i');
+    const filter = { 'media.extractedText': { $regex: regex } };
+    if (doc) filter['media.fileName'] = doc;
+    return await messageCollection
+      .find(filter)
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray();
+  } catch (err) {
+    console.error('❌ Hybrid document search failed:', err);
     return [];
   }
 }
@@ -361,6 +387,21 @@ export async function setMediaExtracted(messageId, { text = '', chunks = 0 }) {
     );
   } catch (err) {
     console.error(`❌ Failed to record extraction result for ${messageId}:`, err.message);
+  }
+}
+
+// Documents received and parsed for the RAG (panel: document list + Q&A)
+export async function getIndexedDocuments(limit = 100) {
+  try {
+    if (!messageCollection) throw new Error("MongoDB not initialized");
+    return await messageCollection
+      .find({ 'media.filePath': { $exists: true, $ne: null } })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray();
+  } catch (err) {
+    console.error('❌ Failed to list indexed documents:', err);
+    return [];
   }
 }
 

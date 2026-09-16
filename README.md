@@ -113,6 +113,7 @@ Open `http://localhost:3000` and enter the `API_TOKEN` when prompted. The panel 
 - **Proposed replies** — whenever a contact writes while auto-reply is **off** (the default), the bot still drafts an answer but does **not** send it. Drafts are listed here: review the incoming message and the drafted reply, then hit **Send** to deliver it, or leave it.
 - **Auto-reply per contact** — one checkbox per contact. Unticked (default) = drafts only; ticked = the bot answers that contact automatically.
 - **Ask the memory** — free-text questions answered from the stored memory, with the sources used.
+- **Documents (RAG)** — every document the bot parsed and indexed (file name, sender, day, chunk count, extracted text). Ask questions about **all documents at once**, or pick one in the dropdown — retrieval then only searches the document chunks (`POST /api/ask` with `scope: "documents"`, optional `doc`).
 - **Daily summaries** — per-contact, per-day digests maintained for retrieval.
 - **Send message / media** — manual outgoing tools.
 - **Bot log** — the persistent activity log: receptions, drafted/sent replies, WhatsApp connections, errors (auto-pruned after 7 days, also available at `GET /api/logs`).
@@ -136,7 +137,8 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | `POST` | `/api/query-memory` | Semantic search through message history **and received documents** (PDF/docx/text are extracted and indexed; images via optional OCR — `MEDIA_OCR_ENABLED`). |
 | `GET` | `/api/graph` | Contact/topic/mention graph built from message metadata (`?maxEdges=300`). |
 | `GET` | `/api/digests` | Per-contact daily summaries (coarse memory level). |
-| `POST` | `/api/ask` | Question → retrieval + LLM answer, **without sending anything** (same pipeline as replies). |
+| `POST` | `/api/ask` | Question → retrieval + LLM answer, **without sending anything** (same pipeline as replies). Optional `"scope": "documents"` restricts retrieval to the indexed document chunks and `"doc": "<file name>"` to a single document. |
+| `GET` | `/api/documents` | Documents parsed and indexed into the RAG (file name, sender, day, chunks, extracted-text preview) — `?limit=100`. |
 | `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs (respects the per-contact toggle; body `"force": true` overrides it). |
 | `GET` | `/api/contacts` | Known contacts with their auto-reply flag and activity counters. |
 | `POST` | `/api/contacts/auto-reply` | Toggle auto-reply per contact: `{"sender": "<jid>", "enabled": true|false}`. |
@@ -162,6 +164,14 @@ curl -s -X POST -H "x-api-token: $TOKEN" -H "Content-Type: application/json" \
 ```
 
 The response includes `matches` (retrieved passages), `refs` (with the day and source) and `used` (retrieval diagnostics). Mentioning the document topic or period ("hier", "la facture") helps the hierarchical retrieval.
+
+In the **web panel**, the *Documents (RAG)* section lists every parsed document and answers questions scoped to the documents only (all of them, or one picked in the dropdown):
+
+```bash
+curl -s -X POST -H "x-api-token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"text":"quelle est la date d echeance ?","scope":"documents"}' \
+  http://localhost:3000/api/ask
+```
 
 Limitations: scanned PDFs (image-only) are logged as `pdf-no-text`; audio/video are not transcribed; OCR needs internet access once to download language data.
 

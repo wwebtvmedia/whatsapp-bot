@@ -14,8 +14,8 @@ import {
   queryChromaDays,
   queryChromaMessages,
   hybridKeywordSearch,
+  hybridDocumentSearch,
   upsertChromaDocChunks,
-  setMediaExtracted,
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
@@ -81,6 +81,49 @@ async function findMessages(queryEmbedding, candidateDays, sender) {
   }
 }
 
+// Shared retrieval plumbing for both scopes (memory / documents): merge the
+// vector hits with the lexical fallback, then compress the context window
+// before it reaches the LLM.
+function mergeHybrid(vectorHits, lexicalDocs, lexicalToHit) {
+  const merged = new Map();
+  (vectorHits.documents?.[0] || []).forEach((text, i) => {
+    if (!text) return;
+    merged.set(text, {
+      text,
+      meta: vectorHits.metadatas?.[0]?.[i] || {},
+      source: 'vector'
+    });
+  });
+  for (const doc of lexicalDocs) {
+    const hit = lexicalToHit(doc);
+    if (!hit?.text || merged.has(hit.text)) continue;
+    merged.set(hit.text, { ...hit, source: 'lexical' });
+  }
+  return [...merged.values()];
+}
+
+function compressHits(hits) {
+  const kept = hits.slice(0, maxContextMessages);
+  const context = kept
+    .map(h => {
+      const m = h.meta || {};
+      const tag = [m.day, m.subject, m.info_type].filter(Boolean).join(' | ');
+      return tag ? `[${tag}] ${h.text}` : h.text;
+    })
+    .join('\n')
+    .slice(0, 4000);
+  return { kept, context };
+}
+
+function toResult(kept, context, used) {
+  return {
+    context,
+    matches: kept.map(h => h.text),
+    refs: kept.map(h => ({ ref: h.meta?.ref, sender: h.meta?.sender, day: h.meta?.day, source: h.source, doc: h.meta?.doc })),
+    used
+  };
+}
+
 /**
  * Full retrieval pipeline.
  * @param {string} query
@@ -100,52 +143,68 @@ export async function searchMemory(query, { sender = null } = {}) {
     lexicalHits = await hybridKeywordSearch(query);
   }
 
-  const merged = new Map();
-  (vectorHits.documents?.[0] || []).forEach((text, i) => {
-    if (!text) return;
-    merged.set(text, {
-      text,
-      meta: vectorHits.metadatas?.[0]?.[i] || {},
-      source: 'vector'
-    });
+  const hits = mergeHybrid(vectorHits, lexicalHits, doc => ({
+    text: doc.messageContent,
+    meta: {
+      sender: doc.sender,
+      subject: doc.subject,
+      info_type: doc.infoType,
+      day: dayKey(doc.timestamp instanceof Date ? doc.timestamp : new Date(doc.timestamp)),
+      ref: doc._id?.toString()
+    }
+  }));
+
+  const { kept, context } = compressHits(hits);
+  return toResult(kept, context, {
+    route,
+    candidateDays,
+    vector: kept.filter(h => h.source === 'vector').length,
+    lexical: kept.filter(h => h.source === 'lexical').length
   });
-  for (const doc of lexicalHits) {
-    if (!doc.messageContent || merged.has(doc.messageContent)) continue;
-    merged.set(doc.messageContent, {
-      text: doc.messageContent,
-      meta: {
-        sender: doc.sender,
-        subject: doc.subject,
-        info_type: doc.infoType,
-        day: dayKey(doc.timestamp instanceof Date ? doc.timestamp : new Date(doc.timestamp)),
-        ref: doc._id?.toString()
-      },
-      source: 'lexical'
-    });
+}
+
+/**
+ * Retrieval restricted to the RAG of received documents: vector search over
+ * the indexed chunks only (optionally a single file), lexical fallback over
+ * the extracted text kept in Mongo.
+ * @param {string} query
+ * @param {{doc?: string|null}} [opts]  doc = media.fileName to focus on one file
+ * @returns {Promise<{context: string, refs: object[], used: object}>}
+ */
+export async function searchDocuments(query, { doc = null } = {}) {
+  const queryEmbedding = await embedText(query, 'query');
+
+  const where = doc ? { $and: [{ info_type: 'document' }, { doc }] } : { info_type: 'document' };
+  let vectorHits = { documents: [[]], metadatas: [[]], distances: [[]] };
+  try {
+    vectorHits = await queryChromaMessages(queryEmbedding, maxContextMessages, where);
+  } catch (err) {
+    console.error('❌ Document chunk search failed:', err.message);
   }
 
-  // Context window management: keep the newest, most relevant slices only
-  const kept = [...merged.values()].slice(0, maxContextMessages);
-  const context = kept
-    .map(h => {
-      const m = h.meta || {};
-      const tag = [m.day, m.subject, m.info_type].filter(Boolean).join(' | ');
-      return tag ? `[${tag}] ${h.text}` : h.text;
-    })
-    .join('\n')
-    .slice(0, 4000);
+  let lexicalHits = [];
+  if (!vectorHits.documents?.[0]?.length) {
+    lexicalHits = await hybridDocumentSearch(query, doc);
+  }
 
-  return {
-    context,
-    matches: kept.map(h => h.text),
-    refs: kept.map(h => ({ ref: h.meta?.ref, sender: h.meta?.sender, day: h.meta?.day, source: h.source, doc: h.meta?.doc })),
-    used: {
-      route,
-      candidateDays,
-      vector: kept.filter(h => h.source === 'vector').length,
-      lexical: kept.filter(h => h.source === 'lexical').length
+  const hits = mergeHybrid(vectorHits, lexicalHits, d => ({
+    text: d.media?.extractedText,
+    meta: {
+      sender: d.sender,
+      doc: d.media?.fileName,
+      info_type: 'document',
+      day: dayKey(d.timestamp instanceof Date ? d.timestamp : new Date(d.timestamp)),
+      ref: d._id?.toString()
     }
-  };
+  }));
+
+  const { kept, context } = compressHits(hits);
+  return toResult(kept, context, {
+    scope: 'documents',
+    doc,
+    vector: kept.filter(h => h.source === 'vector').length,
+    lexical: kept.filter(h => h.source === 'lexical').length
+  });
 }
 
 /**

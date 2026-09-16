@@ -7,8 +7,12 @@ import { chunkText } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
+  saveMessage,
   upsertDailyDigest,
   getDailyDigest,
+  setMediaExtracted,
+  getIndexedDocuments,
+  hybridDocumentSearch,
   getContactSettings,
   setContactAutoReply,
   saveProposedReply,
@@ -98,6 +102,30 @@ test('Storage: bot log round-trips and is readable newest-first', async (t) => {
   assert.strictEqual(mine[0].event, `test.ev2.${token}`); // newest first
   assert.strictEqual(mine[0].level, 'error');
   assert.strictEqual(mine[1].level, 'info');
+});
+
+test('Storage: parsed documents are listable and searchable through their extracted text', async (t) => {
+  if (!await storageAvailable()) return t.skip('MongoDB/ChromaDB not running');
+  const sender = `${uniqueRef()}@s.whatsapp.net`;
+  const savedId = await saveMessage({
+    sender,
+    messageContent: 'document',
+    timestamp: new Date(),
+    messageId: uniqueRef(),
+    messageType: 'documentMessage',
+    media: { filePath: `/tmp/${uniqueRef()}.pdf`, fileName: 'invoice.pdf' }
+  });
+  await setMediaExtracted(savedId, { text: 'Total to pay: 42 euros, due on 2026-10-01.', chunks: 2 });
+
+  const docs = await getIndexedDocuments(50);
+  const mine = docs.find(d => String(d._id) === String(savedId));
+  assert.ok(mine, 'the received document should be listed');
+  assert.strictEqual(mine.media.fileName, 'invoice.pdf');
+  assert.strictEqual(mine.media.indexedChunks, 2);
+  assert.ok(mine.media.extractedText.includes('42 euros'));
+
+  const hits = await hybridDocumentSearch('42 euros');
+  assert.ok(hits.some(d => String(d._id) === String(savedId)));
 });
 
 // Release the Mongo socket so the test runner can exit

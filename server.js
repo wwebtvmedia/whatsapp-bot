@@ -8,11 +8,11 @@ import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 import { ObjectId } from 'mongodb';
 
-import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted, getContactSettings, setContactAutoReply, getContactsWithActivity, saveProposedReply, getRecentProposedReplies, claimProposedReply, markProposedReplySent, markProposedReplyFailed, saveLog, getRecentLogs } from './storage/database.js';
+import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted, getContactSettings, setContactAutoReply, getContactsWithActivity, saveProposedReply, getRecentProposedReplies, claimProposedReply, markProposedReplySent, markProposedReplyFailed, saveLog, getRecentLogs, getIndexedDocuments } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
-import { searchMemory, embedText, indexDocumentChunks } from './memorySearch.js';
+import { searchMemory, searchDocuments, embedText, indexDocumentChunks } from './memorySearch.js';
 import { startMailListener, sendMail } from './MailConnection.js';
 
 dotenv.config();
@@ -25,7 +25,6 @@ const chromaUrl = process.env.CHROMA_URL;
 const downloadsPath = process.env.DOWNLOADS_PATH;
 const authFolder = process.env.WHATSAPP_AUTH_PATH;
 const serverPort = process.env.SERVER_PORT;
-const embeddingUrl = process.env.EMBEDDING_URL;
 // Auto-reply is now per contact (contact_settings collection), toggled from the
 // web panel — the old AUTO_REPLY env var no longer does anything.
 if (process.env.AUTO_REPLY) console.warn('⚠️ AUTO_REPLY is ignored — auto-reply is now per contact, enabled from the web panel');
@@ -333,18 +332,29 @@ app.post('/api/query-memory', authMiddleware, async (req, res) => {
   }
 });
 
-// Full question → answer: retrieval + LLM, same pipeline as the WhatsApp auto-reply
+// Full question → answer: retrieval + LLM, same pipeline as the WhatsApp auto-reply.
+// scope:"documents" restricts retrieval to the indexed document chunks (the
+// panel's RAG view); `doc` (media.fileName) narrows it further to one file.
 app.post('/api/ask', authMiddleware, async (req, res) => {
-  const { text, sender } = req.body;
+  const { text, sender, scope, doc } = req.body;
   if (!text) return res.status(400).json({ error: 'Missing "text" field' });
 
   try {
-    const { context, refs, used } = await searchMemory(text, { sender: sender || null });
+    const { context, refs, used } = scope === 'documents'
+      ? await searchDocuments(text, { doc: doc || null })
+      : await searchMemory(text, { sender: sender || null });
     const answer = await generateAutoReply(text, context);
     res.json({ question: text, answer, refs, used });
   } catch (err) {
     res.status(500).json({ error: 'Failed to answer', details: err.message });
   }
+});
+
+// Documents parsed and indexed into the RAG, newest first
+app.get('/api/documents', authMiddleware, async (req, res) => {
+  const parsed = parseInt(req.query.limit || '100', 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : 100;
+  res.json(await getIndexedDocuments(limit));
 });
 
 app.get('/api/graph', authMiddleware, async (req, res) => {
