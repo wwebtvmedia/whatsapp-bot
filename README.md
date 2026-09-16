@@ -6,7 +6,7 @@ A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB.
 
 - **WhatsApp Integration:** Powered by `@whiskeysockets/baileys`.
 - **Media Management:** Automatically downloads and organizes media files (images, videos, etc.) by sender.
-- **📄 Document Understanding:** Received PDFs, Word files and text documents are extracted, chunked and indexed into the vector memory; images are OCR'd (tesseract, on by default). Scanned PDFs use a two-pass OCR — text pages at full resolution, picture pages described by a vision model. The extracted text is also saved as a `.txt` sidecar next to the downloaded file. Ask questions about their content in plain language.
+- **📄 Document Understanding:** Received PDFs, Word files and text documents are extracted, chunked and indexed into the vector memory; images are OCR'd (tesseract, on by default). Scanned PDFs use a two-pass OCR — text pages at full resolution (300 dpi), picture pages described by a vision model — with **layout-aware reconstruction**: newspaper/magazine columns are detected per page from line coordinates and read column-by-column, so articles come out readable in the `.txt` sidecar saved next to the downloaded file. Ask questions about their content in plain language.
 - **Semantic Memory (GraphRAG):** Uses **ChromaDB** and a custom **Python Embedding Service** (multilingual E5 by default, configurable via `EMBEDDING_MODEL`) with hierarchical retrieval: coarse per-day digests → fine-grained messages/document chunks, plus a lexical fallback and a contact/topic **graph** (`/api/graph`).
 - **AI-Powered Replies:** Generates automated or manual replies using **Ollama** or **Llama.cpp** via an OpenAI-compatible API.
 - **Replies under control:** Auto-reply is **off for every contact by default** and toggled per contact from the web panel. With it off, the bot still drafts every reply and keeps it as a *proposed reply* — review and send it with one click. Every bot event lands in a persistent activity log shown in the panel.
@@ -64,7 +64,7 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 | `MEDIA_OCR_ENABLED` | `true` | OCR received images (tesseract, `eng+fra`; downloads language data on first use). |
 | `MEDIA_PDF_OCR_PAGES` / `MEDIA_PDF_OCR_DPI` | `30` / `300` | Scanned PDFs (image pages — magazines…) run a **two-pass OCR**: a cheap low-DPI pass (`MEDIA_PDF_PREVIEW_DPI`, 100) classifies every page, only text pages (≥ `MEDIA_PDF_TEXT_WORDS` words, 20) get full-resolution OCR. The OCR output is **layout-aware**: columns are read column-by-column (headlines first) so articles come out readable, and garbage lines are dropped. |
 | `MEDIA_VISION_MODEL` | *(empty)* | Ollama vision model (e.g. `vision:latest`) that describes the picture pages of scanned PDFs instead of OCR-ing them — one line per page in the index. |
-| `MEDIA_MAX_CHUNKS` | `60` | Cap on indexed chunks per document (~50 pages). |
+| `MEDIA_MAX_CHUNKS` | `200` | Cap on indexed chunks per document (~180 pages; the extracted text is always fully kept in the `.txt` sidecar). |
 | `MAIL_ENABLED` | `false` | Ingest inbound emails (needs `MAIL_HOST`, `MAIL_USER`, `MAIL_PASS`, `MAIL_FROM`, `MAIL_IMAP_HOST`). |
 | `DIGEST_EMBED_EVERY` / `CONTEXT_MAX_MESSAGES` | `5` / `6` | Memory tuning. |
 
