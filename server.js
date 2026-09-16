@@ -14,6 +14,7 @@ import { normalizeMessageContent } from '@whiskeysockets/baileys';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
 import { searchMemory, searchDocuments, embedText, indexDocumentChunks } from './memorySearch.js';
+import { writeExtractedTextFile } from './mediaText.js';
 import { startMailListener, sendMail } from './MailConnection.js';
 
 dotenv.config();
@@ -207,6 +208,8 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
           fileName: path.basename(mediaPath)
         });
         await setMediaExtracted(savedId, { text: result.text, chunks: result.indexed });
+        const txtPath = writeExtractedTextFile(mediaPath, result.text, result.kind);
+        if (txtPath) console.log(`📝 Extracted text saved: ${path.basename(txtPath)}`);
         if (result.indexed > 0) console.log(`📄 Document indexed: ${result.indexed} chunk(s) [${result.kind}]`);
         else console.log(`📄 No text extracted from ${path.basename(mediaPath)} [${result.kind}]`);
       } catch (err) {

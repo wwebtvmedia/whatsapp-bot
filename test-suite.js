@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
-import { chunkText } from './mediaText.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -195,6 +198,40 @@ test('chunkText: splits with overlap and caps the chunk count', () => {
   assert.strictEqual(capped.length, 5);
   // empty / whitespace-only input
   assert.deepStrictEqual(chunkText('   '), []);
+});
+
+test('Extracted text sidecar: written with method header, skipped when empty', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'txt-sidecar-'));
+  try {
+    const pdfPath = path.join(dir, 'doc.pdf');
+    fs.writeFileSync(pdfPath, '%PDF-fake');
+    const out = writeExtractedTextFile(pdfPath, '[page 1] Hello world', 'pdf-ocr');
+    assert.ok(out?.endsWith('doc.pdf.txt'));
+    const content = fs.readFileSync(out, 'utf8');
+    assert.match(content, /# Texte extrait de doc\.pdf/);
+    assert.match(content, /# Méthode : OCR tesseract \(pdf-ocr\)/);
+    assert.ok(content.includes('---\n[page 1] Hello world'));
+    // native text layer: no OCR mention
+    const nativeOut = writeExtractedTextFile(pdfPath, 'native text', 'pdf');
+    assert.match(fs.readFileSync(nativeOut, 'utf8'), /# Méthode : pdf\n/);
+    // nothing extracted → no file
+    assert.strictEqual(writeExtractedTextFile(pdfPath, '', 'pdf-no-text'), null);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'none.pdf.txt')), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Page classification: text pages vs picture pages for the two-pass OCR', () => {
+  const article = 'The missile shield would stretch over land and sea, officials said. '.repeat(3);
+  const adPage = '· · · — 45 % 12 3 ... ±· —'; // punctuation/number noise, no real words
+  const { textPages, imagePages } = classifyPages([article, adPage, 'Buy now', article], 20);
+  assert.deepStrictEqual(textPages, [0, 3]);
+  assert.deepStrictEqual(imagePages, [1, 2]);
+  assert.ok(countRealWords(article) > 20);
+  assert.ok(countRealWords(adPage) < 20);
+  // empty input classifies nothing
+  assert.deepStrictEqual(classifyPages([]), { textPages: [], imagePages: [] });
 });
 
 // 3. Test LLM Logic (Formatting)
