@@ -158,7 +158,8 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
   for (const msg of messages) {
     const jid = msg.key.remoteJid;
     const isGroup = jid.endsWith('@g.us');
-    if (!msg.message || isGroup || jid.endsWith('@bot') || msg.key.fromMe) continue;
+    // Status broadcasts are contacts' status updates, not conversation
+    if (!msg.message || isGroup || jid.startsWith('status@') || jid.endsWith('@bot') || msg.key.fromMe) continue;
 
     const messageId = msg.key.id;
     const timestamp = msg.messageTimestamp;
