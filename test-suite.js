@@ -250,7 +250,7 @@ test('OCR noise guard: garbled lines are dropped at extraction time', () => {
   assert.deepStrictEqual(cleanOcrText(''), '');
 });
 
-test('formatParagraphs: rebuilds blocks/paragraphs/lines with blank-line separators', () => {
+test('formatParagraphs: without bboxes, falls back to natural line order', () => {
   const blocks = [
     {
       paragraphs: [
@@ -260,10 +260,9 @@ test('formatParagraphs: rebuilds blocks/paragraphs/lines with blank-line separat
     },
     { paragraphs: [{ lines: [{ text: 'MARTIN WOLF, PAGE 17\n' }] }] }
   ];
-  const out = formatParagraphs(blocks);
   assert.strictEqual(
-    out,
-    'Can Trump build his Star Wars\nmissile shield?\n\nA BIG READ, PAGE 6\n\nMARTIN WOLF, PAGE 17'
+    formatParagraphs(blocks),
+    'Can Trump build his Star Wars\nmissile shield?\nA BIG READ, PAGE 6\nMARTIN WOLF, PAGE 17'
   );
   // no blocks (or unexpected shape) → empty string, callers fall back to data.text
   assert.strictEqual(formatParagraphs(undefined), '');
@@ -272,33 +271,38 @@ test('formatParagraphs: rebuilds blocks/paragraphs/lines with blank-line separat
 });
 
 test('formatParagraphs: reads newspaper columns column-by-column, headlines first', () => {
-  const par = (x0, y0, x1, y1, text) => ({ bbox: [x0, y0, x1, y1], lines: [{ text: text + '\n' }] });
+  const ln = (x0, y0, x1, y1, text) => ({ bbox: [x0, y0, x1, y1], text: text + '\n' });
   const blocks = [{
-    paragraphs: [
-      par(20, 600, 980, 650, 'Full width section bar'),
-      par(340, 310, 650, 560, 'R2'),
-      par(20, 110, 300, 300, 'L1'),
-      par(20, 60, 980, 100, 'HEADLINE'),
-      par(20, 310, 300, 560, 'L2'),
-      par(340, 110, 650, 300, 'R1')
-    ]
+    paragraphs: [{ lines: [
+      ln(20, 600, 980, 650, 'Full width section bar'),
+      ln(340, 180, 650, 200, 'R2'),
+      ln(20, 110, 300, 130, 'L1a'),
+      ln(20, 134, 300, 152, 'L1b'),
+      ln(20, 60, 980, 100, 'HEADLINE'),
+      ln(20, 180, 300, 200, 'L2'),
+      ln(340, 110, 650, 130, 'R1a'),
+      ln(340, 134, 650, 152, 'R1b')
+    ] }]
   }];
-  // natural y-order would interleave the columns (L1, R1, L2, R2…); the layout
-  // pass must read: headline, whole left column, whole right column, bar
+  // tesseract merges narrow columns into wide blocks; line-level layout must
+  // read: headline, whole left column (L1a+L1b re-joined, then L2), whole
+  // right column, then the full-width bar
   assert.strictEqual(
     formatParagraphs(blocks),
-    'HEADLINE\n\nL1\n\nL2\n\nR1\n\nR2\n\nFull width section bar'
+    'HEADLINE\n\nL1a L1b\n\nL2\n\nR1a R1b\n\nR2\n\nFull width section bar'
   );
 });
 
 test('formatParagraphs: adapts per page — single column and three-column layouts', () => {
-  const par = (x0, y0, x1, y1, text) => ({ bbox: [x0, y0, x1, y1], lines: [{ text: text + '\n' }] });
-  // single-column page (letter, book): full-width paragraphs keep natural order
-  const single = [{ paragraphs: [par(20, 60, 980, 200, 'P1'), par(20, 210, 980, 400, 'P2')] }];
-  assert.strictEqual(formatParagraphs(single), 'P1\n\nP2');
+  const ln = (x0, y0, x1, y1, text) => ({ bbox: [x0, y0, x1, y1], text: text + '\n' });
+  const wrap = (...lines) => [{ paragraphs: [{ lines }] }];
+  // single-column page (letter, book): full-width lines keep natural order
+  assert.strictEqual(formatParagraphs(wrap(ln(20, 60, 980, 200, 'P1'), ln(20, 210, 980, 400, 'P2'))), 'P1\n\nP2');
   // three narrow columns are detected and read left to right
-  const three = [{ paragraphs: [par(20, 60, 300, 500, 'C1'), par(340, 60, 620, 500, 'C2'), par(660, 60, 980, 500, 'C3')] }];
-  assert.strictEqual(formatParagraphs(three), 'C1\n\nC2\n\nC3');
+  assert.strictEqual(
+    formatParagraphs(wrap(ln(20, 60, 300, 500, 'C1'), ln(340, 60, 620, 500, 'C2'), ln(660, 60, 980, 500, 'C3'))),
+    'C1\n\nC2\n\nC3'
+  );
 });
 
 // 3. Test LLM Logic (Formatting)

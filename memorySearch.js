@@ -28,7 +28,9 @@ const maxContextMessages = parseInt(process.env.CONTEXT_MAX_MESSAGES || '6', 10)
 const COARSE_RESULTS = 3;
 const ocrEnabled = process.env.MEDIA_OCR_ENABLED !== 'false';
 const ocrLang = process.env.MEDIA_OCR_LANG || 'eng+fra';
-const maxDocChunks = parseInt(process.env.MEDIA_MAX_CHUNKS || '60', 10);
+// 60 chunks = 54k chars max indexed; a scanned magazine at 300 dpi yields
+// ~380k chars, so the default scales up (tunable per deployment)
+const maxDocChunks = parseInt(process.env.MEDIA_MAX_CHUNKS || '200', 10);
 
 export async function embedText(text, type = 'passage') {
   const response = await fetch(embeddingUrl, {

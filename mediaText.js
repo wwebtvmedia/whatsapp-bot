@@ -64,59 +64,86 @@ async function ocrImages(imagePaths, ocrLang) {
   }
 }
 
-// Rebuild the page the way it was printed. Newspapers and magazines are laid
-// out in columns: a plain top-to-bottom OCR pass interleaves them into
-// gibberish. Paragraphs carry bounding boxes, so the reading order is
-// reconstructed — full-width blocks (headlines, section bars) act as band
-// separators, and inside each band the narrow columns are read left to right,
-// top to bottom. Without usable bboxes, falls back to natural block order.
+// Rebuild the page the way it was printed. Tesseract often merges narrow
+// newspaper columns into wide blocks, so the reconstruction works at LINE
+// level: wide lines (headlines, section bars) act as band separators, narrow
+// lines are clustered into columns by x-overlap (the gutter), then read
+// column by column, top to bottom. Lines close together reform paragraphs.
+// Without usable bboxes it falls back to natural block order.
 export function formatParagraphs(blocks) {
   if (!Array.isArray(blocks)) return '';
-  const items = [];
+  const lines = [];
   for (const block of blocks) {
     for (const paragraph of block?.paragraphs || []) {
-      const lines = (paragraph.lines || [])
-        .map(line => (line.text || '').replace(/\s+$/, ''))
-        .filter(Boolean);
-      if (lines.length) items.push({ text: lines.join('\n'), bbox: paragraph.bbox || null });
+      for (const line of paragraph?.lines || []) {
+        const text = (line.text || '').replace(/\s+$/, '');
+        if (text) lines.push({ text, bbox: line.bbox || null });
+      }
     }
   }
-  if (!items.length) return '';
+  if (!lines.length) return '';
 
-  const pageWidth = Math.max(...items.map(i => i.bbox?.[2] || 0));
-  const layoutReady = pageWidth > 0 && items.every(i => Array.isArray(i.bbox));
-  if (!layoutReady) return items.map(i => i.text).join('\n\n');
+  const pageWidth = Math.max(...lines.map(l => l.bbox?.[2] || 0));
+  const layoutReady = pageWidth > 0 && lines.every(l => Array.isArray(l.bbox) && l.bbox.length >= 4);
+  if (!layoutReady) return lines.map(l => l.text).join('\n');
 
-  const full = items.filter(i => i.bbox[2] - i.bbox[0] >= pageWidth * 0.55)
+  const wide = lines.filter(l => l.bbox[2] - l.bbox[0] >= pageWidth * 0.55)
     .sort((a, b) => a.bbox[1] - b.bbox[1]);
-  const cols = items.filter(i => !full.includes(i));
+  const narrow = lines.filter(l => !wide.includes(l));
+  const columns = detectColumns(narrow);
 
   const ordered = [];
   let bandTop = 0;
-  for (const separator of full) {
+  for (const separator of wide) {
     // -15px tolerance: columns often start flush under the headline baseline
-    ordered.push(...readColumns(cols.filter(i => i.bbox[1] >= bandTop - 15 && i.bbox[1] < separator.bbox[1])));
+    ordered.push(...readColumnBands(columns, bandTop - 15, separator.bbox[1]));
     ordered.push(separator);
     bandTop = separator.bbox[3];
   }
-  ordered.push(...readColumns(cols.filter(i => i.bbox[1] >= bandTop - 15)));
-  return ordered.map(i => i.text).join('\n\n');
+  ordered.push(...readColumnBands(columns, bandTop - 15, Infinity));
+  return ordered.map(l => l.text).join('\n\n');
 }
 
-// Group paragraphs whose x-ranges overlap into the same column, then read
-// each column top-down, columns left to right
-function readColumns(items) {
+// Cluster narrow lines into columns: two lines share a column when their
+// x-ranges overlap (a gutter means no overlap). Columns keep insertion order.
+function detectColumns(lines) {
   const columns = [];
-  for (const item of [...items].sort((a, b) => a.bbox[0] - b.bbox[0])) {
-    const column = columns.find(c => item.bbox[0] < c.x1 * 0.98);
+  for (const line of [...lines].sort((a, b) => a.bbox[0] - b.bbox[0])) {
+    const column = columns.find(c => line.bbox[0] < c.x1 - 5);
     if (column) {
-      column.items.push(item);
-      column.x1 = Math.max(column.x1, item.bbox[2]);
+      column.lines.push(line);
+      column.x1 = Math.max(column.x1, line.bbox[2]);
     } else {
-      columns.push({ x1: item.bbox[2], items: [item] });
+      columns.push({ x0: line.bbox[0], x1: line.bbox[2], lines: [line] });
     }
   }
-  return columns.flatMap(col => col.items.sort((a, b) => a.bbox[1] - b.bbox[1]));
+  return columns;
+}
+
+// Inside a vertical band, read each column top-down (columns left to right),
+// rebuilding paragraphs from the vertical gap between consecutive lines
+function readColumnBands(columns, top, bottom) {
+  const out = [];
+  for (const column of columns) {
+    const colLines = column.lines
+      .filter(l => l.bbox[1] >= top && l.bbox[1] < bottom)
+      .sort((a, b) => a.bbox[1] - b.bbox[1]);
+    let paragraph = '';
+    let prevBottom = null;
+    for (const line of colLines) {
+      const [x0, y0, , y1] = line.bbox;
+      const lineGapThreshold = (y1 - y0) * 0.9;
+      const sameParagraph = prevBottom !== null && y0 - prevBottom <= lineGapThreshold;
+      if (sameParagraph) paragraph += ' ' + line.text;
+      else {
+        if (paragraph) out.push({ text: paragraph });
+        paragraph = line.text;
+      }
+      prevBottom = y1;
+    }
+    if (paragraph) out.push({ text: paragraph });
+  }
+  return out;
 }
 
 // Render PDF pages to PNGs for the OCR (pdftoppm, poppler-utils). Scanned
