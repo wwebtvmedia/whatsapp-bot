@@ -73,7 +73,7 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 1. **Remote Ollama** — configured in `.env` (`OLLAMA_URL`, e.g. `http://192.168.1.x:11434`, model `OLLAMA_MODEL`, default `bestmodel:latest`). Used when the server is reachable; leave `OLLAMA_URL` empty to force the local fallback. One-shot overrides: `OLLAMA_REMOTE=... ./install.sh` or `REMOTE_MODEL=... ./install.sh`.
 2. **Local llama.cpp** (fallback) — downloads a fast medium 7B model (Qwen2.5-7B-Instruct, Q4_K_M ~4.7 GB) to `models/model.gguf` and starts the bundled `llamacpp` service (`--profile local-llm`).
 
-To run the local service manually: `podman-compose up -d --profile local-llm`.
+To run the local service manually: `podman-compose --profile local-llm up -d` (the `--profile` flag goes **before** the subcommand — the portable form, which is what `install.sh` uses too).
 
 ---
 
@@ -86,6 +86,15 @@ To run the local service manually: `podman-compose up -d --profile local-llm`.
 ```
 
 Detects Podman or Docker automatically (installs Podman and `podman-compose` via `apt`/`dnf`/`pacman` if missing), creates `.env` on first run (with a generated `API_TOKEN`), prepares the data folders, then builds and starts the whole stack.
+
+### Clean Restart / Stop
+
+```bash
+./install.sh --restart   # stop, then start the stack again (no rebuild)
+./install.sh --stop      # stop the stack
+```
+
+Both keep every piece of data: MongoDB, Chroma, downloads, the WhatsApp session and the downloaded model. Use plain `./install.sh` to apply code or configuration changes (it rebuilds and re-checks the LLM backend).
 
 ### Using Podman
 

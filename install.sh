@@ -10,6 +10,25 @@ cd "$(dirname "$0")"
 
 echo "🤖 WhatsApp AI Bot — installation"
 
+# ---------------------------------------------------------------------------
+# 0. Mode: full init (default), clean restart or clean stop. Host data
+#    (Mongo, Chroma, downloads, WhatsApp session, model) is always kept.
+# ---------------------------------------------------------------------------
+MODE="install"
+usage() {
+  echo "Usage: ./install.sh [--restart|--stop]"
+  echo "  (default)   full init: engine check, .env, LLM backend, build + start"
+  echo "  --restart   cleanly stop, then start the stack again (no rebuild, data kept)"
+  echo "  --stop      cleanly stop the stack (data kept)"
+}
+case "${1:-}" in
+  ""|install) ;;
+  --restart|restart) MODE="restart" ;;
+  --stop|stop) MODE="stop" ;;
+  -h|--help) usage; exit 0 ;;
+  *) echo "❌ Unknown option: $1"; usage; exit 1 ;;
+esac
+
 # Name the phase being installed, so a failure points at the right block and
 # the full underlying error can be read in the output above.
 CURRENT_STEP="startup"
@@ -111,9 +130,10 @@ step "Preparing data folders"
 mkdir -p models downloads auth backups data/db data/chroma embedding-service/cache
 
 # ---------------------------------------------------------------------------
-# 4. LLM backend: prefer the remote Ollama server, fall back to a local GGUF
+# 4. LLM backend: prefer the remote Ollama server, fall back to a local GGUF.
+#    Restart/stop skip the probing and the .env rewrite entirely — the
+#    llamacpp profile is derived from the LLM_URL already in .env.
 # ---------------------------------------------------------------------------
-step "Choosing the LLM backend"
 # Read a value from .env without executing it ($2 = fallback)
 env_val() {
   local v
@@ -121,66 +141,99 @@ env_val() {
   echo "${v:-$2}"
 }
 
-# Precedence: environment variable > .env > empty (local llama.cpp fallback)
-OLLAMA_REMOTE="${OLLAMA_REMOTE:-$(env_val OLLAMA_URL "")}"
-REMOTE_MODEL="${REMOTE_MODEL:-$(env_val OLLAMA_MODEL bestmodel:latest)}"
-# Fast medium 7B-class model (Q4_K_M quant, ~4.7 GB), good on CPU-only hosts
-GGUF_URL="https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+USE_LOCAL_LLM=0
+if [ "$MODE" != "install" ]; then
+  case "$(env_val LLM_URL "")" in *llamacpp:8080*) USE_LOCAL_LLM=1 ;; esac
+else
+  step "Choosing the LLM backend"
 
-set_llm_env() {
-  sed -i "s|^LLM_URL=.*|LLM_URL=$1|" .env
-  sed -i "s|^LLM_TYPE=.*|LLM_TYPE=$2|" .env
-  sed -i "s|^LLM_MODEL=.*|LLM_MODEL=$3|" .env
+  # Precedence: environment variable > .env > empty (local llama.cpp fallback)
+  OLLAMA_REMOTE="${OLLAMA_REMOTE:-$(env_val OLLAMA_URL "")}"
+  REMOTE_MODEL="${REMOTE_MODEL:-$(env_val OLLAMA_MODEL bestmodel:latest)}"
+  # Fast medium 7B-class model (Q4_K_M quant, ~4.7 GB), good on CPU-only hosts
+  GGUF_URL="https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+
+  set_llm_env() {
+    sed -i "s|^LLM_URL=.*|LLM_URL=$1|" .env
+    sed -i "s|^LLM_TYPE=.*|LLM_TYPE=$2|" .env
+    sed -i "s|^LLM_MODEL=.*|LLM_MODEL=$3|" .env
+  }
+
+  USE_LOCAL_LLM=1
+  if [ -z "$OLLAMA_REMOTE" ]; then
+    echo "ℹ️  OLLAMA_URL is empty in .env — local llama.cpp model only"
+    REMOTE_TAGS=""
+  else
+    REMOTE_TAGS=$(curl -s --max-time 5 "$OLLAMA_REMOTE/api/tags" || true)
+  fi
+
+  if echo "$REMOTE_TAGS" | grep -qF "\"name\":\"$REMOTE_MODEL\""; then
+    echo "✔️  Remote Ollama found at $OLLAMA_REMOTE — using '$REMOTE_MODEL'"
+    set_llm_env "$OLLAMA_REMOTE/api/chat" ollama "$REMOTE_MODEL"
+    USE_LOCAL_LLM=0
+  elif [ -n "$REMOTE_TAGS" ]; then
+    echo "⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing."
+    # grep -o parsing: the old cut -d'"' -f4 picked the wrong field and
+    # grep -v exited 1 on empty input, killing the whole install under pipefail
+    REMOTE_MODEL_LIST=$(echo "$REMOTE_TAGS" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 || true)
+    if [ -n "$REMOTE_MODEL_LIST" ]; then
+      echo "    Models available on the remote:"
+      echo "$REMOTE_MODEL_LIST" | sed 's/^/      - /'
+    fi
+    echo "    Falling back to a local model."
+  elif [ -n "$OLLAMA_REMOTE" ]; then
+    echo "⚠️  Ollama not reachable at $OLLAMA_REMOTE — falling back to a local model."
+    echo "    (Check OLLAMA_URL in .env, or empty it to pick local without this warning.)"
+  fi
+
+  if [ "$USE_LOCAL_LLM" = "1" ]; then
+    if [ -f models/model.gguf ]; then
+      echo "✔️  Local model found: models/model.gguf"
+    else
+      echo "⬇️  Downloading Qwen2.5-7B-Instruct (Q4_K_M, ~4.7 GB)..."
+      if ! curl -L -C - --fail --progress-bar -o models/model.gguf "$GGUF_URL"; then
+        echo "❌ Model download failed (curl error above)."
+        echo "   Resume it manually with:"
+        echo "     curl -L -C - --fail -o models/model.gguf '$GGUF_URL'"
+        exit 1
+      fi
+    fi
+    set_llm_env "http://llamacpp:8080/v1/chat/completions" openai model
+  fi
+fi
+
+# Clean stop: containers and networks go away, host data stays. The profile
+# goes BEFORE the subcommand (podman-compose only parses it there) and is
+# always passed on down: llamacpp may still be running from an older .env.
+stop_stack() {
+  step "Stopping the stack"
+  if ! $COMPOSE --profile local-llm down --remove-orphans; then
+    $COMPOSE down || true
+  fi
 }
 
-USE_LOCAL_LLM=1
-if [ -z "$OLLAMA_REMOTE" ]; then
-  echo "ℹ️  OLLAMA_URL is empty in .env — local llama.cpp model only"
-  REMOTE_TAGS=""
+if [ "$MODE" = "stop" ]; then
+  stop_stack
+  echo ""
+  echo "✅ Stack stopped — data and WhatsApp session kept."
+  echo "   Start it again with: ./install.sh --restart"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Start the stack (build on install; llamacpp only with a local model)
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "restart" ]; then
+  stop_stack
+  step "Starting services (no rebuild — run ./install.sh to apply code changes)"
 else
-  REMOTE_TAGS=$(curl -s --max-time 5 "$OLLAMA_REMOTE/api/tags" || true)
+  step "Building and starting services (first build downloads ~1 GB)..."
 fi
-
-if echo "$REMOTE_TAGS" | grep -qF "\"name\":\"$REMOTE_MODEL\""; then
-  echo "✔️  Remote Ollama found at $OLLAMA_REMOTE — using '$REMOTE_MODEL'"
-  set_llm_env "$OLLAMA_REMOTE/api/chat" ollama "$REMOTE_MODEL"
-  USE_LOCAL_LLM=0
-elif [ -n "$REMOTE_TAGS" ]; then
-  echo "⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing."
-  # grep -o + -F-free parsing: the old cut -d'"' -f4 picked the wrong field and
-  # grep -v exited 1 on empty input, killing the whole install under pipefail
-  REMOTE_MODEL_LIST=$(echo "$REMOTE_TAGS" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 || true)
-  if [ -n "$REMOTE_MODEL_LIST" ]; then
-    echo "    Models available on the remote:"
-    echo "$REMOTE_MODEL_LIST" | sed 's/^/      - /'
-  fi
-  echo "    Falling back to a local model."
-elif [ -n "$OLLAMA_REMOTE" ]; then
-  echo "⚠️  Ollama not reachable at $OLLAMA_REMOTE — falling back to a local model."
-  echo "    (Check OLLAMA_URL in .env, or empty it to pick local without this warning.)"
-fi
-
-if [ "$USE_LOCAL_LLM" = "1" ]; then
-  if [ -f models/model.gguf ]; then
-    echo "✔️  Local model found: models/model.gguf"
-  else
-    echo "⬇️  Downloading Qwen2.5-7B-Instruct (Q4_K_M, ~4.7 GB)..."
-    if ! curl -L -C - --fail --progress-bar -o models/model.gguf "$GGUF_URL"; then
-      echo "❌ Model download failed (curl error above)."
-      echo "   Resume it manually with:"
-      echo "     curl -L -C - --fail -o models/model.gguf '$GGUF_URL'"
-      exit 1
-    fi
-  fi
-  set_llm_env "http://llamacpp:8080/v1/chat/completions" openai model
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Build and start the stack (llamacpp only when running a local model)
-# ---------------------------------------------------------------------------
-step "Building and starting services (first build downloads ~1 GB)..."
-COMPOSE_UP=($COMPOSE up -d --build)
+COMPOSE_UP=($COMPOSE)
+# --profile is a global flag: it must precede the subcommand for podman-compose
 if [ "$USE_LOCAL_LLM" = "1" ]; then COMPOSE_UP+=(--profile local-llm); fi
+COMPOSE_UP+=(up -d)
+if [ "$MODE" = "install" ]; then COMPOSE_UP+=(--build); fi
 if ! "${COMPOSE_UP[@]}"; then
   echo "❌ Build/startup failed — the full error is printed above."
   echo "   Inspect the stack with:"
@@ -188,6 +241,15 @@ if ! "${COMPOSE_UP[@]}"; then
   echo "     $COMPOSE logs --tail=100"
   echo "   Retry the whole install with: ./install.sh"
   exit 1
+fi
+
+if [ "$MODE" = "restart" ]; then
+  echo ""
+  echo "✅ Stack restarted cleanly — data and WhatsApp session kept."
+  echo "   Status:  $COMPOSE ps"
+  echo "   Logs:    $COMPOSE logs -f whatsapp-bot"
+  echo "   Panel:   http://localhost:3000"
+  exit 0
 fi
 
 cat <<EOF
@@ -200,6 +262,7 @@ Next steps:
   2. Open the control panel:
        http://localhost:3000
      (the API token is in .env → API_TOKEN)
-  3. Stop everything later with:
-       $COMPOSE down
+  3. Restart or stop everything later with:
+       ./install.sh --restart     (no rebuild)
+       ./install.sh --stop
 EOF
