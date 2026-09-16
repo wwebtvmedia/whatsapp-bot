@@ -26,10 +26,14 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024;
 // Scanned PDFs are rasterized then OCR'd page by page — this bounds the work
 const MAX_PDF_OCR_PAGES = parseInt(process.env.MEDIA_PDF_OCR_PAGES || '30', 10);
 const PDF_OCR_DPI = parseInt(process.env.MEDIA_PDF_OCR_DPI || '150', 10);
-// Quick classification pass: low DPI keeps it several times faster
-const PDF_PREVIEW_DPI = parseInt(process.env.MEDIA_PDF_PREVIEW_DPI || '72', 10);
-// A page counts as "text" when the quick pass finds at least this many words
-const PDF_TEXT_PAGE_WORDS = parseInt(process.env.MEDIA_PDF_TEXT_WORDS || '40', 10);
+// Quick classification pass: low DPI keeps it several times faster. 100 dpi
+// is the floor where newsprint columns still OCR to ~30+ words per page.
+const PDF_PREVIEW_DPI = parseInt(process.env.MEDIA_PDF_PREVIEW_DPI || '100', 10);
+// A page counts as "text" when the quick pass finds at least this many words.
+// Calibrated on a scanned FT: real text pages score 30-110 at 100 dpi, picture
+// pages under 15. Bias towards false positives — re-OCR costs seconds, a
+// misclassified article page loses its whole text.
+const PDF_TEXT_PAGE_WORDS = parseInt(process.env.MEDIA_PDF_TEXT_WORDS || '20', 10);
 // Picture pages described by a vision model (Ollama /api/chat) — empty: off
 const VISION_MODEL = process.env.MEDIA_VISION_MODEL || '';
 const MAX_VISION_PAGES = parseInt(process.env.MEDIA_VISION_PAGES || '6', 10);
