@@ -237,7 +237,9 @@ test('Page classification: text pages vs picture pages for the two-pass OCR', ()
 
 test('OCR noise guard: garbled fragments stay out of the LLM context', () => {
   assert.ok(isReadableText('[page 1] Can Trump build his Star Wars missile shield? A BIG READ by Martin Wolf'));
-  assert.ok(!isReadableText('| Jal Es 1108 N vel ÿ N Je . ca % a AE a cu . ±· — 45 % 12 3'));
+  assert.ok(isReadableText('The missile shield would stretch over land and sea, officials said yesterday.'));
+  assert.ok(!isReadableText('| Jal Es 1108 N vel ÿ N Je . ca % a AE a cu . Where Rare Books Live fli AR UN Co Ho NR'));
+  assert.ok(!isReadableText('E Ee eT LTE eye EE re ae | CIN OYE TES GOA is ETE, eee SRE ss 5 effort in call ith Tru'));
   assert.ok(!isReadableText(''));
 });
 

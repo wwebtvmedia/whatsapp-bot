@@ -19,7 +19,7 @@ import {
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
-import { extractTextFromFile, chunkText, countRealWords } from './mediaText.js';
+import { extractTextFromFile, chunkText } from './mediaText.js';
 
 dotenv.config();
 
@@ -104,11 +104,14 @@ function mergeHybrid(vectorHits, lexicalDocs, lexicalToHit) {
 
 // OCR noise guard: fragments that are mostly punctuation/number garbage
 // (stock tables, garbled picture pages) poison small local models — drop them
-// from the LLM context. Kept hits keep their relevance order.
+// from the LLM context. OCR gibberish is rich in 2-letter pseudo-words, so the
+// test counts words of 4+ real characters (calibrated on the scanned FT: clean
+// blocks score 0.5+, garbled ones under 0.35).
 export function isReadableText(text) {
   const words = (text || '').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return false;
-  return countRealWords(text) / words.length >= 0.5;
+  const real = (text.match(/[A-Za-zÀ-ÿ0-9]{4,}/g) || []).length;
+  return real / words.length >= 0.35;
 }
 
 function compressHits(hits) {
