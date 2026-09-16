@@ -62,6 +62,7 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 | :--- | :--- | :--- |
 | `MEDIA_INDEXING` | `true` | Extract and index the text of received PDF/docx/text files. |
 | `MEDIA_OCR_ENABLED` | `true` | OCR received images (tesseract, `eng+fra`; downloads language data on first use). |
+| `MEDIA_PDF_OCR_PAGES` / `MEDIA_PDF_OCR_DPI` | `30` / `150` | Scanned PDFs (image pages — magazines…) are rasterized with poppler then OCR'd page by page; these cap pages and resolution. |
 | `MEDIA_MAX_CHUNKS` | `60` | Cap on indexed chunks per document (~50 pages). |
 | `MAIL_ENABLED` | `false` | Ingest inbound emails (needs `MAIL_HOST`, `MAIL_USER`, `MAIL_PASS`, `MAIL_FROM`, `MAIL_IMAP_HOST`). |
 | `DIGEST_EMBED_EVERY` / `CONTEXT_MAX_MESSAGES` | `5` / `6` | Memory tuning. |

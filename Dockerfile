@@ -5,6 +5,12 @@ FROM docker.io/library/node:20
 # Set working directory inside the container
 WORKDIR /usr/src/app
 
+# poppler-utils (pdftoppm) rasterizes scanned PDF pages so tesseract.js can
+# OCR them — image-only magazines otherwise yield only their watermark text
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy only package files first (helps with Docker layer caching)
 COPY package*.json ./
 
