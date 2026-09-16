@@ -32,7 +32,9 @@ const PDF_PREVIEW_DPI = parseInt(process.env.MEDIA_PDF_PREVIEW_DPI || '72', 10);
 const PDF_TEXT_PAGE_WORDS = parseInt(process.env.MEDIA_PDF_TEXT_WORDS || '40', 10);
 // Picture pages described by a vision model (Ollama /api/chat) — empty: off
 const VISION_MODEL = process.env.MEDIA_VISION_MODEL || '';
-const MAX_VISION_PAGES = parseInt(process.env.MEDIA_VISION_PAGES || '12', 10);
+const MAX_VISION_PAGES = parseInt(process.env.MEDIA_VISION_PAGES || '6', 10);
+// Vision calls must never hang the ingestion: bounded generation + hard timeout
+const VISION_TIMEOUT_MS = parseInt(process.env.MEDIA_VISION_TIMEOUT_MS || '120000', 10);
 // Language data is downloaded on first OCR and cached outside the app dir
 const TESSDATA_DIR = path.join(os.tmpdir(), 'tessdata');
 
@@ -111,9 +113,11 @@ async function describeImage(imagePath) {
   const response = await fetch(visionUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
     body: JSON.stringify({
       model: VISION_MODEL,
       stream: false,
+      options: { num_predict: 80 },
       messages: [{
         role: 'user',
         content: 'Décris cette page de document en une ou deux phrases utiles pour une recherche : sujet, type de contenu (photo, publicité, graphique…), titres ou texte visible.',
