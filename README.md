@@ -138,6 +138,7 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/health` | Check bot status and user info. |
+| `GET` | `/api/version` | App version, node version, uptime and WhatsApp connection state — **no token required**. |
 | `POST` | `/api/send-message` | Send a text message. |
 | `POST` | `/api/send-media` | Send a file (multipart/form-data). |
 | `POST` | `/api/send-email` | Send an email (`MAIL_ENABLED` + SMTP config required). |

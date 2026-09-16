@@ -234,6 +234,11 @@ if (mailEnabled) {
   }
 }
 
+// App version from package.json — surfaced via GET /api/version
+const { version: appVersion } = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')
+);
+
 // Express API setup
 const app = express();
 const upload = multer();
@@ -254,6 +259,17 @@ app.get('/api/health', (_, res) => {
   sock?.user
     ? res.json({ status: 'ok', user: sock.user })
     : res.status(500).json({ status: 'disconnected' });
+});
+
+// Runtime info, unauthenticated like /api/health: identifies which version a
+// deployed instance runs from a plain curl (panel badge, ops checks)
+app.get('/api/version', (_, res) => {
+  res.json({
+    version: appVersion,
+    node: process.version,
+    uptimeSeconds: Math.round(process.uptime()),
+    whatsapp: getSocket()?.user ? 'connected' : 'disconnected'
+  });
 });
 
 app.post('/api/send-message', authMiddleware, async (req, res) => {

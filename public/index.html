@@ -187,6 +187,7 @@
   <header class="panel-head">
     <h1>WhatsApp Bot</h1>
     <span class="tagline">control panel &amp; journal</span>
+    <span id="app-version" class="chip type" hidden></span>
     <span id="conn-state"><span class="dot"></span>checking…</span>
   </header>
 
@@ -693,6 +694,18 @@
       el.textContent = JSON.stringify(await res.json(), null, 2);
     }
 
+    // --- Version badge (unauthenticated endpoint, tolerant of older bots) ---
+    async function loadVersion() {
+      try {
+        const data = await (await fetch('/api/version')).json();
+        const el = document.getElementById('app-version');
+        el.textContent = 'v' + data.version;
+        el.hidden = false;
+        el.title = `node ${data.node} · uptime ${Math.round((data.uptimeSeconds || 0) / 60)} min · whatsapp ${data.whatsapp}`;
+      } catch { /* endpoint missing on an older deployment: badge stays hidden */ }
+    }
+
+    loadVersion();
     loadJournal();
   </script>
 </body>
