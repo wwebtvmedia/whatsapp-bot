@@ -8,8 +8,11 @@ WORKDIR /usr/src/app
 # Copy only package files first (helps with Docker layer caching)
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install --production
+# Install dependencies — npm ci honors the committed package-lock.json exactly
+# (deterministic builds) and --omit=dev keeps nodemon & co out of the image.
+# The lockfile pins patched versions via package.json "overrides" (npm audit: 0
+# vulnerabilities in production deps).
+RUN npm ci --omit=dev
 
 # Now copy the rest of the application code
 COPY . .

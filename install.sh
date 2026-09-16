@@ -8,6 +8,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# ANSI colors — errors must be impossible to miss in a long build log
+RED=$'\033[0;31m'
+YEL=$'\033[0;33m'
+NC=$'\033[0m'
+
 echo "🤖 WhatsApp AI Bot — installation"
 
 # ---------------------------------------------------------------------------
@@ -17,7 +22,7 @@ echo "🤖 WhatsApp AI Bot — installation"
 MODE="install"
 usage() {
   echo "Usage: ./install.sh [--restart|--stop]"
-  echo "  (default)   full init: engine check, .env, LLM backend, build + start"
+  echo "  (default)   full init: cleanup, engine check, .env, LLM backend, build + start"
   echo "  --restart   cleanly stop, then start the stack again (no rebuild, data kept)"
   echo "  --stop      cleanly stop the stack (data kept)"
 }
@@ -26,7 +31,7 @@ case "${1:-}" in
   --restart|restart) MODE="restart" ;;
   --stop|stop) MODE="stop" ;;
   -h|--help) usage; exit 0 ;;
-  *) echo "❌ Unknown option: $1"; usage; exit 1 ;;
+  *) echo "${RED}❌ Unknown option: $1${NC}"; usage; exit 1 ;;
 esac
 
 # Name the phase being installed, so a failure points at the right block and
@@ -40,9 +45,9 @@ step() {
 on_error() {
   local code=$?
   echo ""
-  echo "❌ Installation failed during: $CURRENT_STEP (exit code $code)"
-  echo "   The full error is printed above; nothing is silenced."
-  echo "   To trace every command, re-run: bash -x ./install.sh"
+  echo "${RED}❌ Installation failed during: $CURRENT_STEP (exit code $code)${NC}"
+  echo "${RED}   The full error is printed above; nothing is silenced.${NC}"
+  echo "${RED}   To trace every command, re-run: bash -x ./install.sh${NC}"
   exit "$code"
 }
 trap on_error ERR
@@ -76,7 +81,7 @@ if [ -z "$ENGINE" ]; then
   if pkg_install podman; then
     ENGINE="podman"
   else
-    echo "❌ Could not install Podman automatically (package-manager error above)."
+    echo "${RED}❌ Could not install Podman automatically (package-manager error above).${NC}"
     echo "   Install it manually: https://podman.io/docs/installation"
     exit 1
   fi
@@ -100,14 +105,62 @@ else
 fi
 
 if [ -z "$COMPOSE" ]; then
-  echo "❌ $ENGINE is installed, but the automatic podman-compose install failed (error above)."
+  echo "${RED}❌ $ENGINE is installed, but the automatic podman-compose install failed (error above).${NC}"
   echo "   Install one manually: apt install podman-compose  (or: pipx install podman-compose)"
   exit 1
 fi
 echo "✔️  Using: $COMPOSE"
 
 # ---------------------------------------------------------------------------
-# 2. Create .env from the template on first run
+# 2. Clean leftovers from previous runs — BEFORE anything long-running.
+#    A stack that didn't shut down cleanly keeps its container names
+#    (whatsapp-bot_mongo_1, ...) and makes the final `up` fail with
+#    "the container name ... is already in use" — at the very end of the
+#    build. Cleaning first turns that late failure into a fast startup.
+#    Host data (bind mounts) is never touched.
+# ---------------------------------------------------------------------------
+ENGINE_BIN="$ENGINE" # podman | docker — used for engine-level cleanup below
+PROJECT_NAME="$(basename "$PWD" | tr '[:upper:]' '[:lower:]')"
+
+remove_leftover_containers() {
+  local leftovers
+  leftovers="$("$ENGINE_BIN" ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^${PROJECT_NAME}[_-]" || true)"
+  if [ -n "$leftovers" ]; then
+    echo "🧹 Removing leftover containers: $(echo "$leftovers" | tr '\n' ' ')"
+    if ! echo "$leftovers" | xargs -r "$ENGINE_BIN" rm -f >/dev/null 2>&1; then
+      echo "${YEL}⚠️  Could not remove some leftovers — if the start fails on a name conflict, run: $ENGINE_BIN rm -f \$(${ENGINE_BIN} ps -aq --filter name=${PROJECT_NAME})${NC}"
+    fi
+  fi
+}
+
+stop_stack() {
+  step "Stopping the stack"
+  # The profile goes BEFORE the subcommand (podman-compose only parses it
+  # there) and is always passed on down: llamacpp may still be running from an
+  # older .env.
+  if ! $COMPOSE --profile local-llm down --remove-orphans; then
+    $COMPOSE down || true
+  fi
+  remove_leftover_containers
+}
+
+prune_dangling_images() {
+  # Untagged images from previous builds pile up (GBs each). Prune only the
+  # dangling ones — tagged images of other projects are never touched.
+  if "$ENGINE_BIN" image prune -f >/dev/null 2>&1; then
+    echo "🧹 Dangling images from previous builds pruned"
+  else
+    echo "${YEL}⚠️  Could not prune dangling images (harmless — they only waste disk space)${NC}"
+  fi
+}
+
+if [ "$MODE" = "install" ]; then
+  stop_stack
+  prune_dangling_images
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Create .env from the template on first run
 # ---------------------------------------------------------------------------
 step "Creating .env (first run only)"
 if [ ! -f .env ]; then
@@ -124,13 +177,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Ensure runtime directories exist (rootless engines don't create mounts)
+# 4. Ensure runtime directories exist (rootless engines don't create mounts)
 # ---------------------------------------------------------------------------
 step "Preparing data folders"
 mkdir -p models downloads auth backups data/db data/chroma embedding-service/cache
 
 # ---------------------------------------------------------------------------
-# 4. LLM backend: prefer the remote Ollama server, fall back to a local GGUF.
+# 5. LLM backend: prefer the remote Ollama server, fall back to a local GGUF.
 #    Restart/stop skip the probing and the .env rewrite entirely — the
 #    llamacpp profile is derived from the LLM_URL already in .env.
 # ---------------------------------------------------------------------------
@@ -172,7 +225,7 @@ else
     set_llm_env "$OLLAMA_REMOTE/api/chat" ollama "$REMOTE_MODEL"
     USE_LOCAL_LLM=0
   elif [ -n "$REMOTE_TAGS" ]; then
-    echo "⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing."
+    echo "${YEL}⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing.${NC}"
     # grep -o parsing: the old cut -d'"' -f4 picked the wrong field and
     # grep -v exited 1 on empty input, killing the whole install under pipefail
     REMOTE_MODEL_LIST=$(echo "$REMOTE_TAGS" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 || true)
@@ -182,7 +235,7 @@ else
     fi
     echo "    Falling back to a local model."
   elif [ -n "$OLLAMA_REMOTE" ]; then
-    echo "⚠️  Ollama not reachable at $OLLAMA_REMOTE — falling back to a local model."
+    echo "${YEL}⚠️  Ollama not reachable at $OLLAMA_REMOTE — falling back to a local model.${NC}"
     echo "    (Check OLLAMA_URL in .env, or empty it to pick local without this warning.)"
   fi
 
@@ -192,7 +245,7 @@ else
     else
       echo "⬇️  Downloading Qwen2.5-7B-Instruct (Q4_K_M, ~4.7 GB)..."
       if ! curl -L -C - --fail --progress-bar -o models/model.gguf "$GGUF_URL"; then
-        echo "❌ Model download failed (curl error above)."
+        echo "${RED}❌ Model download failed (curl error above).${NC}"
         echo "   Resume it manually with:"
         echo "     curl -L -C - --fail -o models/model.gguf '$GGUF_URL'"
         exit 1
@@ -202,16 +255,7 @@ else
   fi
 fi
 
-# Clean stop: containers and networks go away, host data stays. The profile
-# goes BEFORE the subcommand (podman-compose only parses it there) and is
-# always passed on down: llamacpp may still be running from an older .env.
-stop_stack() {
-  step "Stopping the stack"
-  if ! $COMPOSE --profile local-llm down --remove-orphans; then
-    $COMPOSE down || true
-  fi
-}
-
+# Clean stop: containers and networks go away, host data stays.
 if [ "$MODE" = "stop" ]; then
   stop_stack
   echo ""
@@ -221,7 +265,7 @@ if [ "$MODE" = "stop" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Start the stack (build on install; llamacpp only with a local model)
+# 6. Start the stack (build on install; llamacpp only with a local model)
 # ---------------------------------------------------------------------------
 if [ "$MODE" = "restart" ]; then
   stop_stack
@@ -235,7 +279,7 @@ if [ "$USE_LOCAL_LLM" = "1" ]; then COMPOSE_UP+=(--profile local-llm); fi
 COMPOSE_UP+=(up -d)
 if [ "$MODE" = "install" ]; then COMPOSE_UP+=(--build); fi
 if ! "${COMPOSE_UP[@]}"; then
-  echo "❌ Build/startup failed — the full error is printed above."
+  echo "${RED}❌ Build/startup failed — the full error is printed above.${NC}"
   echo "   Inspect the stack with:"
   echo "     $COMPOSE ps"
   echo "     $COMPOSE logs --tail=100"

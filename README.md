@@ -94,7 +94,7 @@ Detects Podman or Docker automatically (installs Podman and `podman-compose` via
 ./install.sh --stop      # stop the stack
 ```
 
-Both keep every piece of data: MongoDB, Chroma, downloads, the WhatsApp session and the downloaded model. Use plain `./install.sh` to apply code or configuration changes (it rebuilds and re-checks the LLM backend).
+All modes keep every piece of data: MongoDB, Chroma, downloads, the WhatsApp session and the downloaded model. Before building, the installer also **cleans leftovers from previous runs** — stopped containers still holding the project's container names and dangling images from previous builds — so a `up` failing on *« the container name … is already in use »* cannot happen anymore. Use plain `./install.sh` to apply code or configuration changes (it rebuilds and re-checks the LLM backend).
 
 ### Using Podman
 
