@@ -16,6 +16,7 @@ import { promisify } from 'util';
 import fetch from 'node-fetch';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js'; // lib entry: avoids the package's debug auto-run
 import mammoth from 'mammoth';
+import sharp from 'sharp';
 import { createWorker } from 'tesseract.js';
 
 const execFileAsync = promisify(execFile);
@@ -179,6 +180,73 @@ async function rasterizePdfPage(filePath, pageNumber, dpi = PDF_OCR_DPI) {
   }
 }
 
+// Split a rasterized page into vertical column bands by finding gutters
+// (near-empty pixel columns). Tesseract merges narrow newspaper columns into
+// its lines — no post-processing can undo that — so the page must be cut
+// BEFORE the OCR: each band is then OCR'd separately, and the text comes out
+// column by column. Pages without clear gutters stay whole.
+export async function findColumnCuts(pngPath, { whiteRatio = 0.08, minGutterRatio = 0.006, minBandRatio = 0.05 } = {}) {
+  const { data, info } = await sharp(pngPath).greyscale().raw().toBuffer({ resolveWithObject: true });
+  const { width, height } = info;
+  const step = height > 1200 ? 2 : 1; // sample every other row: plenty for gutters
+  const rows = Math.ceil(height / step);
+
+  const ink = new Float64Array(width);
+  for (let y = 0; y < height; y += step) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (data[row + x] < 128) ink[x]++;
+    }
+  }
+
+  const whiteThreshold = rows * whiteRatio;
+  const minGutter = Math.max(6, Math.round(width * minGutterRatio));
+  const margin = Math.round(width * 0.05); // never cut inside the page margins
+
+  const cuts = [0];
+  let runStart = -1;
+  for (let x = margin; x < width - margin; x++) {
+    const white = ink[x] <= whiteThreshold;
+    if (white && runStart < 0) runStart = x;
+    if (runStart >= 0 && (!white || x === width - margin - 1)) {
+      if (x - runStart >= minGutter) cuts.push(Math.round((runStart + x) / 2));
+      runStart = -1;
+    }
+  }
+  cuts.push(width);
+
+  // keep the cuts that leave bands wide enough to hold a real column, and
+  // drop bands that contain no ink at all (page margins misdetected as cuts)
+  const bands = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const left = cuts[i];
+    const w = cuts[i + 1] - left;
+    if (w < width * minBandRatio || w > width * (1 - minBandRatio)) continue;
+    let bandInk = 0;
+    for (let x = left; x < left + w; x++) bandInk += ink[x];
+    if (bandInk > 0) bands.push({ left, width: w });
+  }
+  // a single band spanning the whole page = no real split
+  if (bands.length <= 1) return null;
+  return bands;
+}
+
+// Cut a page image into its column bands (files alongside the original) and
+// return their paths in reading order; null result means "keep whole page".
+export async function splitImageColumns(pngPath, bands) {
+  const cuts = bands || await findColumnCuts(pngPath);
+  if (!cuts) return null;
+  const { height } = await sharp(pngPath).metadata();
+  const out = [];
+  for (let i = 0; i < cuts.length; i++) {
+    const outPath = pngPath.replace(/\.png$/i, `-col${i}.png`);
+    await sharp(pngPath).extract({ left: cuts[i].left, top: 0, width: cuts[i].width, height })
+      .png().toFile(outPath);
+    out.push(outPath);
+  }
+  return out;
+}
+
 // Words of 2+ real characters — ads/graph pages yield mostly punctuation noise
 export function countRealWords(text) {
   return (text.match(/[A-Za-zÀ-ÿ0-9]{2,}/g) || []).length;
@@ -267,8 +335,11 @@ export async function extractTextFromFile(filePath, { ocrEnabled = false, ocrLan
           for (const i of textPages) {
             const full = await rasterizePdfPage(filePath, i + 1);
             try {
-              const [pageText] = await ocrImages([full.pagePath], ocrLang);
-              const clean = cleanOcrText(pageText);
+              // columns are cut at the image level: tesseract cannot recover
+              // interleaved columns from a whole-page raster
+              const bands = await splitImageColumns(full.pagePath);
+              const bandTexts = await ocrImages(bands || [full.pagePath], ocrLang);
+              const clean = cleanOcrText(bandTexts.filter(Boolean).join('\n\n'));
               if (clean.trim()) pageParts.push(`[page ${i + 1}] ${clean}`);
             } finally {
               fs.rmSync(full.tmpDir, { recursive: true, force: true });

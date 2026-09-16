@@ -6,7 +6,8 @@ import path from 'path';
 import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs } from './mediaText.js';
+import sharp from 'sharp';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -303,6 +304,26 @@ test('formatParagraphs: adapts per page — single column and three-column layou
     formatParagraphs(wrap(ln(20, 60, 300, 500, 'C1'), ln(340, 60, 620, 500, 'C2'), ln(660, 60, 980, 500, 'C3'))),
     'C1\n\nC2\n\nC3'
   );
+});
+
+test('findColumnCuts: finds the gutter of a synthetic two-column page', async () => {
+  const w = 300, h = 100;
+  const buf = Buffer.alloc(w * h, 255);
+  for (let y = 10; y < 90; y++) {
+    for (let x = 20; x < 80; x++) buf[y * w + x] = 0;    // column 1
+    for (let x = 150; x < 260; x++) buf[y * w + x] = 0;  // column 2
+  }
+  const png = path.join(os.tmpdir(), `cuts-${uniqueRef()}.png`);
+  try {
+    await sharp(buf, { raw: { width: w, height: h, channels: 1 } }).png().toFile(png);
+    const cuts = await findColumnCuts(png);
+    assert.ok(cuts, 'two columns should produce a split');
+    assert.strictEqual(cuts.length, 2);
+    const cutX = cuts[0].left + cuts[0].width;
+    assert.ok(cutX > 80 && cutX < 150, `cut at ${cutX} should fall inside the gutter (80..150)`);
+  } finally {
+    await fs.promises.rm(png, { force: true });
+  }
 });
 
 // 3. Test LLM Logic (Formatting)
