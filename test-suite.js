@@ -291,6 +291,16 @@ test('formatParagraphs: reads newspaper columns column-by-column, headlines firs
   );
 });
 
+test('formatParagraphs: adapts per page — single column and three-column layouts', () => {
+  const par = (x0, y0, x1, y1, text) => ({ bbox: [x0, y0, x1, y1], lines: [{ text: text + '\n' }] });
+  // single-column page (letter, book): full-width paragraphs keep natural order
+  const single = [{ paragraphs: [par(20, 60, 980, 200, 'P1'), par(20, 210, 980, 400, 'P2')] }];
+  assert.strictEqual(formatParagraphs(single), 'P1\n\nP2');
+  // three narrow columns are detected and read left to right
+  const three = [{ paragraphs: [par(20, 60, 300, 500, 'C1'), par(340, 60, 620, 500, 'C2'), par(660, 60, 980, 500, 'C3')] }];
+  assert.strictEqual(formatParagraphs(three), 'C1\n\nC2\n\nC3');
+});
+
 // 3. Test LLM Logic (Formatting)
 test('LLM Logic: should handle openai-compatible (llama.cpp) formatting', async (t) => {
     // Mocking environment for this test
