@@ -10,6 +10,7 @@ import { ObjectId } from 'mongodb';
 
 import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted, getContactSettings, setContactAutoReply, getContactsWithActivity, saveProposedReply, getRecentProposedReplies, claimProposedReply, markProposedReplySent, markProposedReplyFailed, saveLog, getRecentLogs, getIndexedDocuments } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
+import { normalizeMessageContent } from '@whiskeysockets/baileys';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
 import { searchMemory, searchDocuments, embedText, indexDocumentChunks } from './memorySearch.js';
@@ -164,8 +165,9 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     const messageId = msg.key.id;
     const timestamp = msg.messageTimestamp;
 
-    const messageType = extractMessageType(msg.message);
-    const messageContent = extractMessageText(msg.message);
+    const content = normalizeMessageContent(msg.message) || {};
+    const messageType = extractMessageType(content);
+    const messageContent = extractMessageText(content);
 
     console.log(`📩 Received message from ${jid}: ${messageContent}`);
     saveLog('message.received', { sender: jid, detail: messageContent.slice(0, 120) });
@@ -174,7 +176,7 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     if (!fs.existsSync(senderFolder)) fs.mkdirSync(senderFolder, { recursive: true });
 
     const isMedia = isMediaType(messageType);
-    const extension = getExtensionByType(messageType, msg.message[messageType]);
+    const extension = getExtensionByType(messageType, content[messageType]);
     const fileName = `${messageId}.${extension}`;
     const filePath = path.join(senderFolder, fileName);
 

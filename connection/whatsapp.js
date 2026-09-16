@@ -3,7 +3,7 @@ import * as baileys from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import path from 'path';
 import fs from 'fs';
-import { useMultiFileAuthState, fetchLatestBaileysVersion, makeWASocket, downloadMediaMessage, DisconnectReason } from '@whiskeysockets/baileys';
+import { useMultiFileAuthState, fetchLatestBaileysVersion, makeWASocket, downloadMediaMessage, DisconnectReason, normalizeMessageContent } from '@whiskeysockets/baileys';
 import { saveLog } from '../storage/database.js';
 
 let sock = null;
@@ -62,8 +62,9 @@ export async function sendMedia(sock, number, mediaBuffer, mimetype, filename = 
 // Downloads the media of a message; returns the written file path (or null on
 // failure) so the caller can index the document's content.
 export async function tryDownloadMedia(msg, downloadsPath, logger, reuploadRequest) {
-  const type = extractMessageType(msg.message);
-  const media = msg.message[type];
+  const content = normalizeMessageContent(msg.message) || {};
+  const type = extractMessageType(content);
+  const media = content[type];
   if (!isMediaType(type)) return null;
 
   try {
@@ -80,7 +81,13 @@ export async function tryDownloadMedia(msg, downloadsPath, logger, reuploadReque
   }
 }
 
-export function extractMessageText(message) {
+// WhatsApp wraps messages in containers (viewOnceMessage, ephemeralMessage,
+// documentWithCaptionMessage, …): a PDF sent normally arrives as
+// `{viewOnceMessage: {message: {documentMessage: …}}}`. Baileys'
+// normalizeMessageContent unwraps those layers — without it the document is
+// seen as a plain "text" message and its media is silently dropped.
+export function extractMessageText(rawMessage) {
+  const message = normalizeMessageContent(rawMessage) || {};
   return message.conversation ||
     message.extendedTextMessage?.text ||
     message.imageMessage?.caption ||
@@ -89,7 +96,8 @@ export function extractMessageText(message) {
     'No text';
 }
 
-export function extractMessageType(message) {
+export function extractMessageType(rawMessage) {
+  const message = normalizeMessageContent(rawMessage) || {};
   return Object.keys(message).find(isMediaType) || 'text';
 }
 
