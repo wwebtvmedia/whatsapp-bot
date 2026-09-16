@@ -208,6 +208,14 @@ db.bot_logs.find()            // bot activity log (auto-pruned after 7 days)
 
 **MongoDB Compass** also works on `mongodb://localhost:27017` (the port is bound to `127.0.0.1` only).
 
+If the vector memory ever gets out of sync with Mongo (restore, chroma data loss), re-index everything with:
+
+```bash
+podman exec whatsapp-bot_whatsapp-bot_1 node scripts/backfill-chroma.mjs
+```
+
+(Idempotent upserts — wait for the embedding service to be up first, `curl -X POST localhost:8001/embed -H 'Content-Type: application/json' -d '{"input":["x"]}'` should answer 200.)
+
 ---
 
 ## 📜 License
