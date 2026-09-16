@@ -366,7 +366,8 @@ app.post('/api/ask', authMiddleware, async (req, res) => {
       ? await searchDocuments(text, { doc: doc || null })
       : await searchMemory(text, { sender: sender || null });
     const answer = await generateAutoReply(text, context);
-    res.json({ question: text, answer, refs, used });
+    // context is included so retrieval quality (and OCR noise) is inspectable
+    res.json({ question: text, answer, refs, used, context });
   } catch (err) {
     res.status(500).json({ error: 'Failed to answer', details: err.message });
   }

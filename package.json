@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-bot",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "🤖 Bot WhatsApp avec Baileys, MongoDB et Docker",
   "main": "server.js",
   "type": "module",
