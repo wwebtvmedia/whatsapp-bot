@@ -6,8 +6,7 @@ import path from 'path';
 import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords } from './mediaText.js';
-import { isReadableText } from './memorySearch.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -235,12 +234,20 @@ test('Page classification: text pages vs picture pages for the two-pass OCR', ()
   assert.deepStrictEqual(classifyPages([]), { textPages: [], imagePages: [] });
 });
 
-test('OCR noise guard: garbled fragments stay out of the LLM context', () => {
-  assert.ok(isReadableText('[page 1] Can Trump build his Star Wars missile shield? A BIG READ by Martin Wolf'));
-  assert.ok(isReadableText('The missile shield would stretch over land and sea, officials said yesterday.'));
-  assert.ok(!isReadableText('| Jal Es 1108 N vel ÿ N Je . ca % a AE a cu . Where Rare Books Live fli AR UN Co Ho NR'));
-  assert.ok(!isReadableText('E Ee eT LTE eye EE re ae | CIN OYE TES GOA is ETE, eee SRE ss 5 effort in call ith Tru'));
-  assert.ok(!isReadableText(''));
+test('OCR noise guard: garbled lines are dropped at extraction time', () => {
+  const ocr = [
+    'Can Trump build his Star Wars missile shield?',
+    'A BIG READ, PAGE 6 MARTIN WOLF, PAGE 17',
+    '| Jal Es 1108 N vel ÿ N Je . ca % a AE a cu .',
+    'E Ee eT LTE eye EE re ae | CIN OYE TES GOA is ETE',
+    'The missile shield would stretch over land and sea, officials said.'
+  ].join('\n');
+  const clean = cleanOcrText(ocr);
+  assert.match(clean, /missile shield/);
+  assert.match(clean, /MARTIN WOLF/);
+  assert.ok(!clean.includes('Jal Es'));
+  assert.ok(!clean.includes('CIN OYE'));
+  assert.deepStrictEqual(cleanOcrText(''), '');
 });
 
 // 3. Test LLM Logic (Formatting)

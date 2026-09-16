@@ -98,6 +98,21 @@ export function countRealWords(text) {
   return (text.match(/[A-Za-zÀ-ÿ0-9]{2,}/g) || []).length;
 }
 
+// Drop OCR garbage lines (garbled graphic zones, stock tables). A scanned page
+// mixes clean article lines and noise, so the filter is per LINE: kept when a
+// few 4+ char words are present AND most tokens are not artifacts. Real text
+// lines score 0.6+, garbled ones under 0.2.
+export function cleanOcrText(text) {
+  return (text || '').split('\n')
+    .filter(line => {
+      const words = line.trim().split(/\s+/).filter(Boolean);
+      if (!words.length) return true;
+      const real = (line.match(/[A-Za-zÀ-ÿ0-9]{4,}/g) || []).length;
+      return real >= 3 && real / words.length >= 0.3;
+    })
+    .join('\n');
+}
+
 // Split quick-pass results into text pages (worth a full-res OCR) and picture
 // pages (better served by an image description than by OCR noise)
 export function classifyPages(pageTexts, minWords = PDF_TEXT_PAGE_WORDS) {
@@ -167,7 +182,8 @@ export async function extractTextFromFile(filePath, { ocrEnabled = false, ocrLan
             const full = await rasterizePdfPage(filePath, i + 1);
             try {
               const [pageText] = await ocrImages([full.pagePath], ocrLang);
-              if (pageText) pageParts.push(`[page ${i + 1}] ${pageText}`);
+              const clean = cleanOcrText(pageText);
+              if (clean.trim()) pageParts.push(`[page ${i + 1}] ${clean}`);
             } finally {
               fs.rmSync(full.tmpDir, { recursive: true, force: true });
             }

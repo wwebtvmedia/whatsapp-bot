@@ -102,21 +102,10 @@ function mergeHybrid(vectorHits, lexicalDocs, lexicalToHit) {
   return [...merged.values()];
 }
 
-// OCR noise guard: fragments that are mostly punctuation/number garbage
-// (stock tables, garbled picture pages) poison small local models — drop them
-// from the LLM context. OCR gibberish is rich in 2-letter pseudo-words, so the
-// test counts words of 4+ real characters (calibrated on the scanned FT: clean
-// blocks score 0.5+, garbled ones under 0.35).
-export function isReadableText(text) {
-  const words = (text || '').trim().split(/\s+/).filter(Boolean);
-  if (!words.length) return false;
-  const real = (text.match(/[A-Za-zÀ-ÿ0-9]{4,}/g) || []).length;
-  return real / words.length >= 0.35;
-}
-
+// OCR noise is filtered at extraction time (cleanOcrText, per line) so the
+// index and the LLM context stay clean downstream.
 function compressHits(hits) {
-  const readable = hits.filter(h => isReadableText(h.text));
-  const kept = (readable.length ? readable : hits.slice(0, 1)).slice(0, maxContextMessages);
+  const kept = hits.slice(0, maxContextMessages);
   const context = kept
     .map(h => {
       const m = h.meta || {};
