@@ -32,7 +32,10 @@ services:
     environment:
       - CHROMA_SERVER_CORS_ALLOW_ORIGINS=http://localhost:3000
     volumes:
-      - ./data/chroma:/chroma:Z
+      # Chroma 1.x persists to /data (image config persist_path) — mounting the
+      # legacy /chroma path left the vectors inside the container layer, lost
+      # on every recreate
+      - ./data/chroma:/data:Z
 
   embeddings:
     build:
