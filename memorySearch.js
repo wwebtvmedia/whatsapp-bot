@@ -19,7 +19,7 @@ import {
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
-import { extractTextFromFile, chunkText } from './mediaText.js';
+import { extractTextFromFile, chunkText, countRealWords } from './mediaText.js';
 
 dotenv.config();
 
@@ -102,8 +102,18 @@ function mergeHybrid(vectorHits, lexicalDocs, lexicalToHit) {
   return [...merged.values()];
 }
 
+// OCR noise guard: fragments that are mostly punctuation/number garbage
+// (stock tables, garbled picture pages) poison small local models — drop them
+// from the LLM context. Kept hits keep their relevance order.
+export function isReadableText(text) {
+  const words = (text || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return false;
+  return countRealWords(text) / words.length >= 0.5;
+}
+
 function compressHits(hits) {
-  const kept = hits.slice(0, maxContextMessages);
+  const readable = hits.filter(h => isReadableText(h.text));
+  const kept = (readable.length ? readable : hits.slice(0, 1)).slice(0, maxContextMessages);
   const context = kept
     .map(h => {
       const m = h.meta || {};

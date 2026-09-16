@@ -7,6 +7,7 @@ import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
 import { chunkText, writeExtractedTextFile, classifyPages, countRealWords } from './mediaText.js';
+import { isReadableText } from './memorySearch.js';
 import {
   initDatabase,
   closeDatabase,
@@ -232,6 +233,12 @@ test('Page classification: text pages vs picture pages for the two-pass OCR', ()
   assert.ok(countRealWords(adPage) < 20);
   // empty input classifies nothing
   assert.deepStrictEqual(classifyPages([]), { textPages: [], imagePages: [] });
+});
+
+test('OCR noise guard: garbled fragments stay out of the LLM context', () => {
+  assert.ok(isReadableText('[page 1] Can Trump build his Star Wars missile shield? A BIG READ by Martin Wolf'));
+  assert.ok(!isReadableText('| Jal Es 1108 N vel ÿ N Je . ca % a AE a cu . ±· — 45 % 12 3'));
+  assert.ok(!isReadableText(''));
 });
 
 // 3. Test LLM Logic (Formatting)
