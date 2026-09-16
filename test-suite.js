@@ -6,7 +6,7 @@ import path from 'path';
 import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText } from './mediaText.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -248,6 +248,47 @@ test('OCR noise guard: garbled lines are dropped at extraction time', () => {
   assert.ok(!clean.includes('Jal Es'));
   assert.ok(!clean.includes('CIN OYE'));
   assert.deepStrictEqual(cleanOcrText(''), '');
+});
+
+test('formatParagraphs: rebuilds blocks/paragraphs/lines with blank-line separators', () => {
+  const blocks = [
+    {
+      paragraphs: [
+        { lines: [{ text: 'Can Trump build his Star Wars\n' }, { text: 'missile shield?\n' }] },
+        { lines: [{ text: 'A BIG READ, PAGE 6\n' }] }
+      ]
+    },
+    { paragraphs: [{ lines: [{ text: 'MARTIN WOLF, PAGE 17\n' }] }] }
+  ];
+  const out = formatParagraphs(blocks);
+  assert.strictEqual(
+    out,
+    'Can Trump build his Star Wars\nmissile shield?\n\nA BIG READ, PAGE 6\n\nMARTIN WOLF, PAGE 17'
+  );
+  // no blocks (or unexpected shape) → empty string, callers fall back to data.text
+  assert.strictEqual(formatParagraphs(undefined), '');
+  assert.strictEqual(formatParagraphs([]), '');
+  assert.strictEqual(formatParagraphs([{}]), '');
+});
+
+test('formatParagraphs: reads newspaper columns column-by-column, headlines first', () => {
+  const par = (x0, y0, x1, y1, text) => ({ bbox: [x0, y0, x1, y1], lines: [{ text: text + '\n' }] });
+  const blocks = [{
+    paragraphs: [
+      par(20, 600, 980, 650, 'Full width section bar'),
+      par(340, 310, 650, 560, 'R2'),
+      par(20, 110, 300, 300, 'L1'),
+      par(20, 60, 980, 100, 'HEADLINE'),
+      par(20, 310, 300, 560, 'L2'),
+      par(340, 110, 650, 300, 'R1')
+    ]
+  }];
+  // natural y-order would interleave the columns (L1, R1, L2, R2…); the layout
+  // pass must read: headline, whole left column, whole right column, bar
+  assert.strictEqual(
+    formatParagraphs(blocks),
+    'HEADLINE\n\nL1\n\nL2\n\nR1\n\nR2\n\nFull width section bar'
+  );
 });
 
 // 3. Test LLM Logic (Formatting)

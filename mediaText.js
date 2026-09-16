@@ -25,7 +25,9 @@ const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'];
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 // Scanned PDFs are rasterized then OCR'd page by page — this bounds the work
 const MAX_PDF_OCR_PAGES = parseInt(process.env.MEDIA_PDF_OCR_PAGES || '30', 10);
-const PDF_OCR_DPI = parseInt(process.env.MEDIA_PDF_OCR_DPI || '150', 10);
+// 300 dpi is what newspaper-size body text (8-9pt) needs to come out readable;
+// 150 dpi only gets the headlines. Cost: roughly 3-4x slower per page.
+const PDF_OCR_DPI = parseInt(process.env.MEDIA_PDF_OCR_DPI || '300', 10);
 // Quick classification pass: low DPI keeps it several times faster. 100 dpi
 // is the floor where newsprint columns still OCR to ~30+ words per page.
 const PDF_PREVIEW_DPI = parseInt(process.env.MEDIA_PDF_PREVIEW_DPI || '100', 10);
@@ -49,15 +51,72 @@ async function ocrImages(imagePaths, ocrLang) {
   fs.mkdirSync(TESSDATA_DIR, { recursive: true });
   const worker = await createWorker(ocrLang, 1, { cachePath: TESSDATA_DIR });
   try {
+    // Keep wide spaces so table-ish lines and column gaps survive as-is
+    await worker.setParameters({ preserve_interword_spaces: '1' });
     const parts = [];
     for (const imagePath of imagePaths) {
       const { data } = await worker.recognize(imagePath);
-      parts.push((data.text || '').trim());
+      parts.push((formatParagraphs(data.blocks) || data.text || '').trim());
     }
     return parts;
   } finally {
     await worker.terminate();
   }
+}
+
+// Rebuild the page the way it was printed. Newspapers and magazines are laid
+// out in columns: a plain top-to-bottom OCR pass interleaves them into
+// gibberish. Paragraphs carry bounding boxes, so the reading order is
+// reconstructed — full-width blocks (headlines, section bars) act as band
+// separators, and inside each band the narrow columns are read left to right,
+// top to bottom. Without usable bboxes, falls back to natural block order.
+export function formatParagraphs(blocks) {
+  if (!Array.isArray(blocks)) return '';
+  const items = [];
+  for (const block of blocks) {
+    for (const paragraph of block?.paragraphs || []) {
+      const lines = (paragraph.lines || [])
+        .map(line => (line.text || '').replace(/\s+$/, ''))
+        .filter(Boolean);
+      if (lines.length) items.push({ text: lines.join('\n'), bbox: paragraph.bbox || null });
+    }
+  }
+  if (!items.length) return '';
+
+  const pageWidth = Math.max(...items.map(i => i.bbox?.[2] || 0));
+  const layoutReady = pageWidth > 0 && items.every(i => Array.isArray(i.bbox));
+  if (!layoutReady) return items.map(i => i.text).join('\n\n');
+
+  const full = items.filter(i => i.bbox[2] - i.bbox[0] >= pageWidth * 0.55)
+    .sort((a, b) => a.bbox[1] - b.bbox[1]);
+  const cols = items.filter(i => !full.includes(i));
+
+  const ordered = [];
+  let bandTop = 0;
+  for (const separator of full) {
+    // -15px tolerance: columns often start flush under the headline baseline
+    ordered.push(...readColumns(cols.filter(i => i.bbox[1] >= bandTop - 15 && i.bbox[1] < separator.bbox[1])));
+    ordered.push(separator);
+    bandTop = separator.bbox[3];
+  }
+  ordered.push(...readColumns(cols.filter(i => i.bbox[1] >= bandTop - 15)));
+  return ordered.map(i => i.text).join('\n\n');
+}
+
+// Group paragraphs whose x-ranges overlap into the same column, then read
+// each column top-down, columns left to right
+function readColumns(items) {
+  const columns = [];
+  for (const item of [...items].sort((a, b) => a.bbox[0] - b.bbox[0])) {
+    const column = columns.find(c => item.bbox[0] < c.x1 * 0.98);
+    if (column) {
+      column.items.push(item);
+      column.x1 = Math.max(column.x1, item.bbox[2]);
+    } else {
+      columns.push({ x1: item.bbox[2], items: [item] });
+    }
+  }
+  return columns.flatMap(col => col.items.sort((a, b) => a.bbox[1] - b.bbox[1]));
 }
 
 // Render PDF pages to PNGs for the OCR (pdftoppm, poppler-utils). Scanned

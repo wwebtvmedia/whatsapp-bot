@@ -62,7 +62,7 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 | :--- | :--- | :--- |
 | `MEDIA_INDEXING` | `true` | Extract and index the text of received PDF/docx/text files. |
 | `MEDIA_OCR_ENABLED` | `true` | OCR received images (tesseract, `eng+fra`; downloads language data on first use). |
-| `MEDIA_PDF_OCR_PAGES` / `MEDIA_PDF_OCR_DPI` | `30` / `150` | Scanned PDFs (image pages — magazines…) run a **two-pass OCR**: a cheap low-DPI pass (`MEDIA_PDF_PREVIEW_DPI`, 72) classifies every page, only text pages (≥ `MEDIA_PDF_TEXT_WORDS` words, 40) get full-resolution OCR. |
+| `MEDIA_PDF_OCR_PAGES` / `MEDIA_PDF_OCR_DPI` | `30` / `300` | Scanned PDFs (image pages — magazines…) run a **two-pass OCR**: a cheap low-DPI pass (`MEDIA_PDF_PREVIEW_DPI`, 100) classifies every page, only text pages (≥ `MEDIA_PDF_TEXT_WORDS` words, 20) get full-resolution OCR. The OCR output is **layout-aware**: columns are read column-by-column (headlines first) so articles come out readable, and garbage lines are dropped. |
 | `MEDIA_VISION_MODEL` | *(empty)* | Ollama vision model (e.g. `vision:latest`) that describes the picture pages of scanned PDFs instead of OCR-ing them — one line per page in the index. |
 | `MEDIA_MAX_CHUNKS` | `60` | Cap on indexed chunks per document (~50 pages). |
 | `MAIL_ENABLED` | `false` | Ingest inbound emails (needs `MAIL_HOST`, `MAIL_USER`, `MAIL_PASS`, `MAIL_FROM`, `MAIL_IMAP_HOST`). |
