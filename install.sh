@@ -141,15 +141,23 @@ else
   REMOTE_TAGS=$(curl -s --max-time 5 "$OLLAMA_REMOTE/api/tags" || true)
 fi
 
-if echo "$REMOTE_TAGS" | grep -q "\"name\":\"$REMOTE_MODEL\""; then
+if echo "$REMOTE_TAGS" | grep -qF "\"name\":\"$REMOTE_MODEL\""; then
   echo "✔️  Remote Ollama found at $OLLAMA_REMOTE — using '$REMOTE_MODEL'"
   set_llm_env "$OLLAMA_REMOTE/api/chat" ollama "$REMOTE_MODEL"
   USE_LOCAL_LLM=0
 elif [ -n "$REMOTE_TAGS" ]; then
   echo "⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing."
-  echo "    Models available on the remote:"
-  echo "$REMOTE_TAGS" | tr ',' '\n' | grep '"name"' | cut -d'"' -f4 | grep -v '^name$' | sed 's/^/      - /'
+  # grep -o + -F-free parsing: the old cut -d'"' -f4 picked the wrong field and
+  # grep -v exited 1 on empty input, killing the whole install under pipefail
+  REMOTE_MODEL_LIST=$(echo "$REMOTE_TAGS" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 || true)
+  if [ -n "$REMOTE_MODEL_LIST" ]; then
+    echo "    Models available on the remote:"
+    echo "$REMOTE_MODEL_LIST" | sed 's/^/      - /'
+  fi
   echo "    Falling back to a local model."
+elif [ -n "$OLLAMA_REMOTE" ]; then
+  echo "⚠️  Ollama not reachable at $OLLAMA_REMOTE — falling back to a local model."
+  echo "    (Check OLLAMA_URL in .env, or empty it to pick local without this warning.)"
 fi
 
 if [ "$USE_LOCAL_LLM" = "1" ]; then
