@@ -7,6 +7,7 @@ let digestCollection;   // conversation digests (hierarchical coarse level)
 let graphCollection;    // lightweight edge store powering /api/graph
 let contactSettingsCollection; // per-contact auto-reply toggle (panel-driven)
 let proposedReplyCollection;   // LLM replies kept for review instead of being sent
+let channelCollection;  // WhatsApp channels (newsletters) the bot follows
 let logCollection;      // bot activity log, readable from the panel
 let chromaMessages;     // fine-grained level: every message
 let chromaDays;         // coarse level: one embedding per sender+day
@@ -39,6 +40,9 @@ export async function initDatabase(mongoUrl, chromaUrl, dbName = 'mcp', collecti
     await proposedReplyCollection.createIndex({ messageRef: 1 }, { unique: true });
     await proposedReplyCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
 
+    channelCollection = db.collection('channels');
+    await channelCollection.createIndex({ jid: 1 }, { unique: true });
+
     logCollection = db.collection('bot_logs');
     // TTL index also serves the createdAt-descending reads
     await logCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 3600 });
@@ -64,7 +68,7 @@ export async function closeDatabase() {
     await mongoClient.close();
     mongoClient = null;
     messageCollection = digestCollection = graphCollection = null;
-    contactSettingsCollection = proposedReplyCollection = logCollection = null;
+    contactSettingsCollection = proposedReplyCollection = channelCollection = logCollection = null;
   }
 }
 
@@ -583,5 +587,52 @@ export async function getRecentLogs(limit = 100) {
   } catch (err) {
     console.error('❌ Failed to get bot logs:', err);
     return [];
+  }
+}
+
+// --- WhatsApp channels (newsletters): follow, backfill bookkeeping ---
+
+export async function getChannels() {
+  try {
+    if (!channelCollection) throw new Error("MongoDB not initialized");
+    return await channelCollection.find().sort({ addedAt: 1 }).toArray();
+  } catch (err) {
+    console.error('❌ Failed to list channels:', err);
+    return [];
+  }
+}
+
+export async function addChannel({ jid, name = '' }) {
+  if (!channelCollection) throw new Error("MongoDB not initialized");
+  return await channelCollection.findOneAndUpdate(
+    { jid },
+    { $set: { name, updatedAt: new Date() }, $setOnInsert: { jid, addedAt: new Date() } },
+    { upsert: true, returnDocument: 'after' }
+  ).then(unwrapFindOneAndUpdate);
+}
+
+export async function removeChannel(jid) {
+  if (!channelCollection) throw new Error("MongoDB not initialized");
+  const result = await channelCollection.deleteOne({ jid });
+  return result.deletedCount > 0;
+}
+
+export async function markChannelBackfilled(jid) {
+  try {
+    if (!channelCollection) throw new Error("MongoDB not initialized");
+    await channelCollection.updateOne({ jid }, { $set: { lastBackfillAt: new Date() } });
+  } catch (err) {
+    console.error('❌ Failed to mark channel backfilled:', err.message);
+  }
+}
+
+// Backfill / replay dedupe: a messageId seen once must not be ingested twice
+export async function messageIdExists(messageId) {
+  try {
+    if (!messageCollection) throw new Error("MongoDB not initialized");
+    return Boolean(await messageCollection.findOne({ messageId }, { projection: { _id: 1 } }));
+  } catch (err) {
+    console.error('❌ Failed to check messageId:', err.message);
+    return false;
   }
 }

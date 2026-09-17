@@ -5,6 +5,7 @@ A sophisticated WhatsApp bot built with Node.js, Baileys, MongoDB, and ChromaDB.
 ## 🚀 Features
 
 - **WhatsApp Integration:** Powered by `@whiskeysockets/baileys`.
+- **📺 WhatsApp Channels (newsletters):** the bot follows channels, receives their posts in real time (auto re-subscribed on every reconnect) and **backfills recent posts** after downtime, so PDFs published in a channel are extracted and indexed exactly like received documents. Add a channel via the API with its invite link; the **message-yourself** chat works too (send a PDF to yourself → indexed).
 - **Media Management:** Automatically downloads and organizes media files (images, videos, etc.) by sender.
 - **📄 Document Understanding:** Received PDFs, Word files and text documents are extracted, chunked and indexed into the vector memory; images are OCR'd (tesseract, on by default). Scanned PDFs use a two-pass OCR — text pages at full resolution (300 dpi), picture pages described by a vision model — with **layout-aware reconstruction**: newspaper/magazine columns are detected per page from line coordinates and read column-by-column, so articles come out readable in the `.txt` sidecar saved next to the downloaded file. Ask questions about their content in plain language.
 - **Semantic Memory (GraphRAG):** Uses **ChromaDB** and a custom **Python Embedding Service** (multilingual E5 by default, configurable via `EMBEDDING_MODEL`) with hierarchical retrieval: coarse per-day digests → fine-grained messages/document chunks, plus a lexical fallback and a contact/topic **graph** (`/api/graph`).
@@ -151,6 +152,9 @@ All API requests (except `/api/health`) require the header `x-api-token: YOUR_SE
 | `GET` | `/api/digests` | Per-contact daily summaries (coarse memory level). |
 | `POST` | `/api/ask` | Question → retrieval + LLM answer, **without sending anything** (same pipeline as replies). Optional `"scope": "documents"` restricts retrieval to the indexed document chunks and `"doc": "<file name>"` to a single document. |
 | `GET` | `/api/documents` | Documents parsed and indexed into the RAG (file name, sender, day, chunks, extracted-text preview) — `?limit=100`. |
+| `GET` | `/api/channels` | WhatsApp channels (newsletters) the bot follows. |
+| `POST` | `/api/channels` | Follow a channel: `{"link": "https://whatsapp.com/channel/<code>"}` or `{"jid": "...@newsletter"}` — subscribes to live updates and backfills recent posts. |
+| `DELETE` | `/api/channels/:jid` | Unfollow a channel (URL-encoded jid). |
 | `POST` | `/api/trigger-reply` | Generate and send AI replies to specific JIDs (respects the per-contact toggle; body `"force": true` overrides it). |
 | `GET` | `/api/contacts` | Known contacts with their auto-reply flag and activity counters. |
 | `POST` | `/api/contacts/auto-reply` | Toggle auto-reply per contact: `{"sender": "<jid>", "enabled": true|false}`. |

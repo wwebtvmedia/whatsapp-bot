@@ -3,7 +3,7 @@ import * as baileys from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import path from 'path';
 import fs from 'fs';
-import { useMultiFileAuthState, fetchLatestBaileysVersion, makeWASocket, downloadMediaMessage, DisconnectReason, normalizeMessageContent } from '@whiskeysockets/baileys';
+import { useMultiFileAuthState, fetchLatestBaileysVersion, makeWASocket, downloadMediaMessage, DisconnectReason, normalizeMessageContent, proto } from '@whiskeysockets/baileys';
 import { saveLog } from '../storage/database.js';
 
 let sock = null;
@@ -14,7 +14,7 @@ export function getSocket() {
   return sock;
 }
 
-export async function startWhatsApp(authFolder, onMessage) {
+export async function startWhatsApp(authFolder, onMessage, onConnect) {
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -32,6 +32,11 @@ export async function startWhatsApp(authFolder, onMessage) {
     }
     if (connection === 'open') {
       saveLog('wa.connected', { user: sock.user?.id });
+      // Fired on every (re)connect — used to re-subscribe to WhatsApp channels,
+      // whose update subscriptions expire server-side
+      if (onConnect) {
+        onConnect(sock).catch(err => console.error('❌ onConnect handler failed:', err.message));
+      }
     }
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -103,6 +108,49 @@ export function extractMessageType(rawMessage) {
 
 export function isMediaType(type) {
   return ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'].includes(type);
+}
+
+// --- WhatsApp channels (newsletters) ---
+
+// newsletterFetchMessages returns the raw iq node; turn the message children
+// into WAMessage-like objects the normal pipeline can ingest (same plaintext
+// decoding as Baileys' live newsletter notification handler).
+export function parseNewsletterFetchResult(result, jid) {
+  const updates = (result?.content || []).find(n => n.tag === 'message_updates');
+  const out = [];
+  for (const node of updates?.content || []) {
+    if (node.tag !== 'message') continue;
+    const plaintext = (node.content || []).find(c => c.tag === 'plaintext');
+    if (!plaintext?.content) continue;
+    try {
+      const buf = typeof plaintext.content === 'string'
+        ? Buffer.from(plaintext.content, 'binary')
+        : Buffer.from(plaintext.content);
+      out.push({
+        key: { remoteJid: jid, id: node.attrs.message_id || node.attrs.server_id, fromMe: false },
+        message: proto.Message.decode(buf),
+        messageTimestamp: +(node.attrs.t || node.attrs.server_time || 0)
+      });
+    } catch {
+      // skip malformed entries — the live notification path logs its own errors
+    }
+  }
+  return out;
+}
+
+export async function fetchRecentNewsletterMessages(sock, jid, count = 10) {
+  const result = await sock.newsletterFetchMessages(jid, count, undefined, undefined);
+  return parseNewsletterFetchResult(result, jid);
+}
+
+// Accepts an @newsletter jid or an invite link (https://whatsapp.com/channel/<code>)
+export async function resolveChannelJid(sock, entry) {
+  if (entry.endsWith('@newsletter')) return entry;
+  const match = entry.match(/whatsapp\.com\/channel\/([\w-]+)/);
+  if (!match) throw new Error(`Not a channel link or jid: ${entry}`);
+  const meta = await sock.newsletterMetadata('invite', match[1]);
+  if (!meta?.id) throw new Error(`Could not resolve channel link: ${entry}`);
+  return meta.id;
 }
 
 export function getExtensionByType(type, mediaMsg = {}) {

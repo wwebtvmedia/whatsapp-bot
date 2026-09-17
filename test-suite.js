@@ -7,6 +7,8 @@ import { filterWhatsappMessage } from './filters/whatsappFilter.js';
 import { filterEmailToStandardMessage } from './filters/mailFilter.js';
 import { queryLLM } from './answerGenerator.js';
 import sharp from 'sharp';
+import { proto } from '@whiskeysockets/baileys';
+import { parseNewsletterFetchResult } from './connection/whatsapp.js';
 import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts } from './mediaText.js';
 import {
   initDatabase,
@@ -324,6 +326,30 @@ test('findColumnCuts: finds the gutter of a synthetic two-column page', async ()
   } finally {
     await fs.promises.rm(png, { force: true });
   }
+});
+
+test('parseNewsletterFetchResult: decodes plaintext channel posts into WAMessages', () => {
+  const doc = proto.Message.fromObject({ documentMessage: { fileName: 'new-scientist.pdf', mimetype: 'application/pdf' } });
+  const buf = Buffer.from(proto.Message.encode(doc).finish());
+  const result = {
+    content: [{
+      tag: 'message_updates',
+      content: [
+        { tag: 'message', attrs: { server_id: '999', t: '1758100000' }, content: [{ tag: 'plaintext', content: buf }] },
+        { tag: 'message', attrs: { server_id: '998' }, content: [{ tag: 'reaction' }] }, // no plaintext → skipped
+        { tag: 'message', attrs: { server_id: '997' }, content: [] }
+      ]
+    }]
+  };
+  const msgs = parseNewsletterFetchResult(result, '1234@newsletter');
+  assert.strictEqual(msgs.length, 1);
+  assert.strictEqual(msgs[0].key.id, '999');
+  assert.strictEqual(msgs[0].key.remoteJid, '1234@newsletter');
+  assert.strictEqual(msgs[0].messageTimestamp, 1758100000);
+  assert.strictEqual(msgs[0].message.documentMessage.fileName, 'new-scientist.pdf');
+  // empty/odd results yield no messages
+  assert.deepStrictEqual(parseNewsletterFetchResult({}, '1234@newsletter'), []);
+  assert.deepStrictEqual(parseNewsletterFetchResult(undefined, '1234@newsletter'), []);
 });
 
 // 3. Test LLM Logic (Formatting)

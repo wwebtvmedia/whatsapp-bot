@@ -8,14 +8,15 @@ import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 import { ObjectId } from 'mongodb';
 
-import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted, getContactSettings, setContactAutoReply, getContactsWithActivity, saveProposedReply, getRecentProposedReplies, claimProposedReply, markProposedReplySent, markProposedReplyFailed, saveLog, getRecentLogs, getIndexedDocuments } from './storage/database.js';
+import { initDatabase, saveMessage, getRecentMessages, getLatestMedia, updateRepliedStatus, getUnrepliedMessages, getDailyDigests, upsertChromaMessage, upsertChromaDay, upsertDailyDigest, upsertGraphEdge, getGraph, dayKey, setMediaExtracted, getContactSettings, setContactAutoReply, getContactsWithActivity, saveProposedReply, getRecentProposedReplies, claimProposedReply, markProposedReplySent, markProposedReplyFailed, saveLog, getRecentLogs, getIndexedDocuments, getChannels, addChannel, removeChannel, markChannelBackfilled, messageIdExists } from './storage/database.js';
 import { startWhatsApp, getSocket, sendMedia, extractMessageText, extractMessageType, getExtensionByType, tryDownloadMedia, isMediaType } from './connection/whatsapp.js';
-import { normalizeMessageContent } from '@whiskeysockets/baileys';
+import { normalizeMessageContent, isJidNewsletter } from '@whiskeysockets/baileys';
 import { generateAutoReply } from './answerGenerator.js';
 import { classifyMessage } from './classifier.js';
 import { searchMemory, searchDocuments, embedText, indexDocumentChunks } from './memorySearch.js';
 import { writeExtractedTextFile } from './mediaText.js';
 import { startMailListener, sendMail } from './MailConnection.js';
+import { fetchRecentNewsletterMessages, resolveChannelJid } from './connection/whatsapp.js';
 
 dotenv.config();
 
@@ -153,15 +154,123 @@ async function generateReplyFor({ sender, savedId, incoming, force = false }) {
   }
 }
 
+// Core per-message ingestion: save → reply pipeline → media download →
+// document indexing. Shared by normal chats, WhatsApp channels (newsletters)
+// and the self-chat, which all produce WAMessage-shaped objects.
+async function ingestWhatsAppMessage(msg, { runReplyPipeline = true } = {}) {
+  const jid = msg.key.remoteJid;
+  const messageId = msg.key.id;
+  const timestamp = msg.messageTimestamp;
+
+  const content = normalizeMessageContent(msg.message) || {};
+  const messageType = extractMessageType(content);
+  const messageContent = extractMessageText(content);
+
+  console.log(`📩 Received message from ${jid}: ${messageContent}`);
+  saveLog('message.received', { sender: jid, detail: messageContent.slice(0, 120) });
+
+  const senderFolder = path.join(downloadsPath, jid.replace('@s.whatsapp.net', ''));
+  if (!fs.existsSync(senderFolder)) fs.mkdirSync(senderFolder, { recursive: true });
+
+  const isMedia = isMediaType(messageType);
+  const extension = getExtensionByType(messageType, content[messageType]);
+  const fileName = `${messageId}.${extension}`;
+  const filePath = path.join(senderFolder, fileName);
+
+  const { savedId, day, subject } = await ingestMessage({
+    sender: jid,
+    messageContent,
+    timestamp,
+    messageId,
+    messageType,
+    media: isMedia ? { filePath, fileName } : null
+  });
+
+  // Auto-reply (if the contact opted in) or a proposal for the panel. Not
+  // awaited on purpose: the LLM latency must not delay media download and
+  // document indexing below. Channels and the self-chat never get replies.
+  if (runReplyPipeline) {
+    void generateReplyFor({ sender: jid, savedId, incoming: messageContent })
+      .catch(err => console.error('❌ Reply pipeline failed:', err.message));
+  }
+
+  const activeSock = getSocket();
+  const mediaPath = await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
+
+  // Index the document's content so questions about it are answerable
+  if (mediaPath && mediaIndexingEnabled) {
+    try {
+      const result = await indexDocumentChunks({
+        messageId, sender: jid, day, ref: savedId.toString(), subject,
+        filePath: mediaPath,
+        fileName: path.basename(mediaPath)
+      });
+      await setMediaExtracted(savedId, { text: result.text, chunks: result.indexed });
+      const txtPath = writeExtractedTextFile(mediaPath, result.text, result.kind);
+      if (txtPath) console.log(`📝 Extracted text saved: ${path.basename(txtPath)}`);
+      if (result.indexed > 0) console.log(`📄 Document indexed: ${result.indexed} chunk(s) [${result.kind}]`);
+      else console.log(`📄 No text extracted from ${path.basename(mediaPath)} [${result.kind}]`);
+    } catch (err) {
+      console.error('❌ Document indexing failed:', err.message);
+    }
+  }
+}
+
+// The "message yourself" chat arrives with fromMe=true and the own JID as
+// remoteJid — indexing it lets the owner feed documents to the bot directly.
+function isOwnJid(jid) {
+  const own = getSocket()?.user?.id?.split(':')[0];
+  return Boolean(own && jid?.startsWith(`${own}@`));
+}
+
+// Channels: follow + subscribe to live updates (the subscription expires
+// server-side, so this re-runs on every reconnect), then backfill recent
+// posts so anything published while offline still gets indexed.
+async function backfillChannel(sock, channel) {
+  const messages = await fetchRecentNewsletterMessages(sock, channel.jid, 10);
+  let indexed = 0;
+  for (const msg of messages) {
+    if (!msg.message || await messageIdExists(msg.key.id)) continue;
+    await ingestWhatsAppMessage(msg, { runReplyPipeline: false });
+    indexed++;
+  }
+  await markChannelBackfilled(channel.jid);
+  if (indexed) saveLog('channel.backfill', { sender: channel.jid, detail: `${indexed} message(s) indexed` });
+}
+
+async function setupChannels(sock) {
+  try {
+    for (const channel of await getChannels()) {
+      try {
+        await sock.newsletterFollow(channel.jid).catch(() => {}); // already-following is fine
+        await sock.subscribeNewsletterUpdates(channel.jid);
+        await backfillChannel(sock, channel);
+        console.log(`📺 Channel subscribed: ${channel.jid}`);
+      } catch (err) {
+        console.error(`❌ Channel setup failed for ${channel.jid}:`, err.message);
+        saveLog('channel.error', { level: 'error', sender: channel.jid, detail: err.message });
+      }
+    }
+  } catch (err) {
+    console.error('❌ Channel setup failed:', err.message);
+  }
+}
+
 // WhatsApp setup
 await startWhatsApp(authFolder, async ({ messages, type }) => {
-  if (type !== 'notify') return;
-
   for (const msg of messages) {
     const jid = msg.key.remoteJid;
+
+    // Channel posts are delivered as 'append' upserts (plaintext, no session)
+    if (isJidNewsletter(jid)) {
+      if (msg.message) await ingestWhatsAppMessage(msg, { runReplyPipeline: false });
+      continue;
+    }
+    if (type !== 'notify') continue;
+
     const isGroup = jid.endsWith('@g.us');
     // Status broadcasts are contacts' status updates, not conversation
-    if (!msg.message || isGroup || jid.startsWith('status@') || jid.endsWith('@bot') || msg.key.fromMe) {
+    if (!msg.message || isGroup || jid.startsWith('status@') || jid.endsWith('@bot')) {
       // A personal message with no content is an undecryptable stub (broken
       // signal session — e.g. the sender reinstalled WhatsApp): logging it is
       // the only way to tell "delivery failed" from "we dropped it".
@@ -173,61 +282,16 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
       continue;
     }
 
-    const messageId = msg.key.id;
-    const timestamp = msg.messageTimestamp;
-
-    const content = normalizeMessageContent(msg.message) || {};
-    const messageType = extractMessageType(content);
-    const messageContent = extractMessageText(content);
-
-    console.log(`📩 Received message from ${jid}: ${messageContent}`);
-    saveLog('message.received', { sender: jid, detail: messageContent.slice(0, 120) });
-
-    const senderFolder = path.join(downloadsPath, jid.replace('@s.whatsapp.net', ''));
-    if (!fs.existsSync(senderFolder)) fs.mkdirSync(senderFolder, { recursive: true });
-
-    const isMedia = isMediaType(messageType);
-    const extension = getExtensionByType(messageType, content[messageType]);
-    const fileName = `${messageId}.${extension}`;
-    const filePath = path.join(senderFolder, fileName);
-
-    const { savedId, day, subject } = await ingestMessage({
-      sender: jid,
-      messageContent,
-      timestamp,
-      messageId,
-      messageType,
-      media: isMedia ? { filePath, fileName } : null
-    });
-
-    // Auto-reply (if the contact opted in) or a proposal for the panel. Not
-    // awaited on purpose: the LLM latency must not delay media download and
-    // document indexing below.
-    void generateReplyFor({ sender: jid, savedId, incoming: messageContent })
-      .catch(err => console.error('❌ Reply pipeline failed:', err.message));
-
-    const activeSock = getSocket();
-    const mediaPath = await tryDownloadMedia(msg, downloadsPath, activeSock.logger, activeSock.updateMediaMessage);
-
-    // Index the document's content so questions about it are answerable
-    if (mediaPath && mediaIndexingEnabled) {
-      try {
-        const result = await indexDocumentChunks({
-          messageId, sender: jid, day, ref: savedId.toString(), subject,
-          filePath: mediaPath,
-          fileName: path.basename(mediaPath)
-        });
-        await setMediaExtracted(savedId, { text: result.text, chunks: result.indexed });
-        const txtPath = writeExtractedTextFile(mediaPath, result.text, result.kind);
-        if (txtPath) console.log(`📝 Extracted text saved: ${path.basename(txtPath)}`);
-        if (result.indexed > 0) console.log(`📄 Document indexed: ${result.indexed} chunk(s) [${result.kind}]`);
-        else console.log(`📄 No text extracted from ${path.basename(mediaPath)} [${result.kind}]`);
-      } catch (err) {
-        console.error('❌ Document indexing failed:', err.message);
-      }
+    // fromMe echoes cover everything the phone itself sends in any chat —
+    // except the self-chat, which is the owner feeding documents to the bot
+    if (msg.key.fromMe) {
+      if (isOwnJid(jid)) await ingestWhatsAppMessage(msg, { runReplyPipeline: false });
+      continue;
     }
+
+    await ingestWhatsAppMessage(msg);
   }
-});
+}, setupChannels);
 
 // Mail ingestion (opt-in: MAIL_ENABLED=true) — emails land in the same memory
 if (mailEnabled) {
@@ -388,6 +452,42 @@ app.get('/api/documents', authMiddleware, async (req, res) => {
   const parsed = parseInt(req.query.limit || '100', 10);
   const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 200) : 100;
   res.json(await getIndexedDocuments(limit));
+});
+
+// --- WhatsApp channels (newsletters): follow, list, unfollow ---
+
+app.get('/api/channels', authMiddleware, async (_, res) => {
+  res.json(await getChannels());
+});
+
+// Body: {"link": "https://whatsapp.com/channel/<code>"} or {"jid": "...@newsletter"}
+// Follows the channel, subscribes to live updates and backfills recent posts.
+app.post('/api/channels', authMiddleware, async (req, res) => {
+  const { link, jid, name } = req.body;
+  const entry = link || jid;
+  if (!entry) return res.status(400).json({ error: 'Missing "link" or "jid" field' });
+  const sock = getSocket();
+  if (!sock?.user) return res.status(503).json({ error: 'WhatsApp not connected' });
+
+  try {
+    const resolved = await resolveChannelJid(sock, entry);
+    await sock.newsletterFollow(resolved).catch(() => {}); // already-following is fine
+    await sock.subscribeNewsletterUpdates(resolved);
+    const channel = await addChannel({ jid: resolved, name: name || '' });
+    await backfillChannel(sock, channel);
+    console.log(`📺 Channel followed: ${resolved}`);
+    saveLog('channel.followed', { sender: resolved, detail: channel?.name || '' });
+    res.json(channel);
+  } catch (err) {
+    console.error('❌ Channel follow failed:', err.message);
+    res.status(500).json({ error: 'Failed to follow channel', details: err.message });
+  }
+});
+
+app.delete('/api/channels/:jid', authMiddleware, async (req, res) => {
+  const removed = await removeChannel(decodeURIComponent(req.params.jid));
+  if (!removed) return res.status(404).json({ error: 'Channel not found' });
+  res.json({ removed: true });
 });
 
 app.get('/api/graph', authMiddleware, async (req, res) => {
