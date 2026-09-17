@@ -21,11 +21,15 @@ import {
 // Responder rungs — bot-local retrieval (chroma) + bot-local LLM (llama.cpp)
 // ---------------------------------------------------------------------------
 
-/** Pull this bot's own memory for a query: conversations + documents. */
+/** Pull this bot's own memory for a query: documents first, then chats.
+ *
+ * Order matters: with a top-K cut after the dedupe, conversation matches
+ * would crowd out the indexed document chunks the query is actually about
+ * (the model then honestly answers INSUFFICIENT_EVIDENCE with no evidence). */
 async function retrieveFromBotMemory(query, topK = 3) {
   const { searchMemory, searchDocuments } = await import('../memorySearch.js');
   const texts = [];
-  for (const search of [searchMemory, searchDocuments]) {
+  for (const search of [searchDocuments, searchMemory]) {
     try {
       const r = await search(query);
       // matches carries the chunk texts (refs is metadata-only)
