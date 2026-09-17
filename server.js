@@ -595,6 +595,15 @@ app.get('/api/logs', authMiddleware, async (req, res) => {
   res.json(await getRecentLogs(limit));
 });
 
+// Omni-Swarm Protocol peer (opt-in): sealed-packet peering with the ospbridge
+// app / other OSP nodes. Mounted under /osp only when OSP_ENABLE=1 so the
+// stock bot surface is unchanged otherwise.
+if (process.env.OSP_ENABLE === '1') {
+  const { buildOspRouter } = await import('./osp/peer.mjs');
+  app.use('/osp', await buildOspRouter(authMiddleware));
+  console.log('🌐 OSP peer enabled under /osp (packets, query, endpoint.json)');
+}
+
 app.listen(serverPort, () => {
   console.log(`🚀 MCP server running at http://localhost:${serverPort}/api/health`);
 });
