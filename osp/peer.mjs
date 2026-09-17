@@ -154,7 +154,8 @@ export async function buildOspRouter(auth) {
       // one sealed reply packet per request
       const reply = await p.responder.onPacket(pkt);
       if (!reply) return res.status(204).end();      // forged/replayed — silent
-      console.log(`↩️ OSP reply to ${pkt.originId}: ${reply.action} ${reply.payload?.reason ?? reply.payload?.bid ?? ''}`);
+      const head = String(reply.payload?.answer ?? '').slice(0, 120).replace(/\s+/g, ' ');
+      console.log(`↩️ OSP reply to ${pkt.originId}: ${reply.action} ${reply.payload?.reason ?? reply.payload?.bid ?? ''}${head ? ` | "${head}"` : ''} prov=${(reply.payload?.provenance ?? []).length}`);
       res.json(reply.toWire());
     } catch (err) {
       console.error('❌ OSP packet handling failed:', err.message);
