@@ -64,12 +64,18 @@ export class BotLlmProvider extends D3Provider {
 
   async generate(query, chunks) {
     const envelope = buildEnvelope(query, chunks);
+    // think:false + options.num_predict: the ollama API ignores `max_tokens`,
+    // and reasoning models (gemma4) then spend the whole budget thinking —
+    // `content` came back EMPTY with done_reason:"length". Disabling the
+    // thinking channel returns a grounded answer in seconds.
     const payload = {
       ...(this.model ? { model: this.model } : {}),
       messages: [{ role: 'user', content: envelope }],
       stream: false,
       temperature: 0.7,
       max_tokens: 90,
+      think: false,
+      options: { num_predict: 150 },
     };
     // hard deadline: a hung LLM must not pin the /osp/packet thread forever
     const res = await fetch(this.url, {
