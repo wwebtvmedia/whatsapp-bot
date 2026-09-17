@@ -42,7 +42,11 @@ async function retrieveFromBotMemory(query, topK = 3) {
       console.warn('⚠️ OSP retrieval failed:', err.message);
     }
   }
-  return dedupe(texts).slice(0, topK);
+  // CPU inference budget: the envelope prefill dominates generation time, so
+  // each chunk travels truncated. The cited hash stays this node's own view
+  // of the chunk (GET_CHUNK serves the same text) — protocol-honest.
+  const capped = texts.map(t => (t.length > 600 ? t.slice(0, 600) : t));
+  return dedupe(capped).slice(0, topK);
 }
 
 function dedupe(texts) {
@@ -72,7 +76,7 @@ export class BotLlmProvider extends D3Provider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(220_000),
+      signal: AbortSignal.timeout(280_000),
     });
     if (!res.ok) throw new Error(`LLM error (${res.status})`);
     const data = await res.json();
