@@ -150,6 +150,7 @@ export async function buildOspRouter(auth) {
     try {
       const reply = p.responder.onPacket(pkt);
       if (!reply) return res.status(204).end();      // forged/replayed — silent
+      console.log(`↩️ OSP reply to ${pkt.originId}: ${reply.action} ${reply.payload?.reason ?? reply.payload?.bid ?? ''}`);
       res.json(reply.toWire());
     } catch (err) {
       console.error('❌ OSP packet handling failed:', err.message);
