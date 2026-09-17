@@ -61,12 +61,14 @@ export class BotLlmProvider extends D3Provider {
       messages: [{ role: 'user', content: envelope }],
       stream: false,
       temperature: 0.7,
-      max_tokens: 150,
+      max_tokens: 90,
     };
+    // hard deadline: a hung LLM must not pin the /osp/packet thread forever
     const res = await fetch(this.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(220_000),
     });
     if (!res.ok) throw new Error(`LLM error (${res.status})`);
     const data = await res.json();
