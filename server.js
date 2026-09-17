@@ -161,7 +161,17 @@ await startWhatsApp(authFolder, async ({ messages, type }) => {
     const jid = msg.key.remoteJid;
     const isGroup = jid.endsWith('@g.us');
     // Status broadcasts are contacts' status updates, not conversation
-    if (!msg.message || isGroup || jid.startsWith('status@') || jid.endsWith('@bot') || msg.key.fromMe) continue;
+    if (!msg.message || isGroup || jid.startsWith('status@') || jid.endsWith('@bot') || msg.key.fromMe) {
+      // A personal message with no content is an undecryptable stub (broken
+      // signal session — e.g. the sender reinstalled WhatsApp): logging it is
+      // the only way to tell "delivery failed" from "we dropped it".
+      if (!msg.message && !isGroup && !msg.key.fromMe && !jid.startsWith('status@') && !jid.endsWith('@bot')) {
+        const detail = `stub ${msg.messageStubType ?? '?'}${msg.messageStubParameters?.length ? ` — ${msg.messageStubParameters.join(', ')}` : ''}`;
+        console.log(`🔒 Undecryptable message from ${jid} (${detail})`);
+        saveLog('message.undecryptable', { level: 'warn', sender: jid, detail });
+      }
+      continue;
+    }
 
     const messageId = msg.key.id;
     const timestamp = msg.messageTimestamp;
