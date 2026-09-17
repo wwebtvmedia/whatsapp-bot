@@ -16,7 +16,7 @@ import { classifyMessage } from './classifier.js';
 import { searchMemory, searchDocuments, embedText, indexDocumentChunks } from './memorySearch.js';
 import { writeExtractedTextFile } from './mediaText.js';
 import { startMailListener, sendMail } from './MailConnection.js';
-import { fetchRecentNewsletterMessages, resolveChannelJid } from './connection/whatsapp.js';
+import { fetchNewsletterHistory, resolveChannelJid } from './connection/whatsapp.js';
 
 dotenv.config();
 
@@ -224,18 +224,24 @@ function isOwnJid(jid) {
 }
 
 // Channels: follow + subscribe to live updates (the subscription expires
-// server-side, so this re-runs on every reconnect), then backfill recent
-// posts so anything published while offline still gets indexed.
-async function backfillChannel(sock, channel) {
-  const messages = await fetchRecentNewsletterMessages(sock, channel.jid, 10);
+// server-side, so this re-runs on every reconnect), then backfill so anything
+// published while offline — or the whole existing archive — still gets
+// indexed. Heavy ingestion runs sequentially and logs its progress.
+async function backfillChannel(sock, channel, { maxMessages = 500 } = {}) {
+  const messages = await fetchNewsletterHistory(sock, channel.jid, { maxMessages });
   let indexed = 0;
   for (const msg of messages) {
     if (!msg.message || await messageIdExists(msg.key.id)) continue;
+    console.log(`📺 Backfilling channel ${channel.jid}: ${msg.key.id} (${indexed + 1}/${messages.length})`);
     await ingestWhatsAppMessage(msg, { runReplyPipeline: false });
     indexed++;
+    if (indexed % 10 === 0) {
+      saveLog('channel.backfill', { sender: channel.jid, detail: `${indexed}/${messages.length} message(s) indexed` });
+    }
   }
   await markChannelBackfilled(channel.jid);
-  if (indexed) saveLog('channel.backfill', { sender: channel.jid, detail: `${indexed} message(s) indexed` });
+  if (indexed) saveLog('channel.backfill', { sender: channel.jid, detail: `${indexed} message(s) indexed (done)` });
+  return { fetched: messages.length, indexed };
 }
 
 async function setupChannels(sock) {
@@ -461,11 +467,13 @@ app.get('/api/channels', authMiddleware, async (_, res) => {
 });
 
 // Body: {"link": "https://whatsapp.com/channel/<code>"} or {"jid": "...@newsletter"}
-// Follows the channel, subscribes to live updates and backfills recent posts.
+// Follows the channel, subscribes to live updates and backfills existing posts
+// (body "backfill": max messages to walk, default 500 — covers the archive).
 app.post('/api/channels', authMiddleware, async (req, res) => {
   const { link, jid, name } = req.body;
   const entry = link || jid;
   if (!entry) return res.status(400).json({ error: 'Missing "link" or "jid" field' });
+  const maxBackfill = Math.max(0, parseInt(req.body.backfill, 10) || 500);
   const sock = getSocket();
   if (!sock?.user) return res.status(503).json({ error: 'WhatsApp not connected' });
 
@@ -474,10 +482,10 @@ app.post('/api/channels', authMiddleware, async (req, res) => {
     await sock.newsletterFollow(resolved).catch(() => {}); // already-following is fine
     await sock.subscribeNewsletterUpdates(resolved);
     const channel = await addChannel({ jid: resolved, name: name || '' });
-    await backfillChannel(sock, channel);
-    console.log(`📺 Channel followed: ${resolved}`);
-    saveLog('channel.followed', { sender: resolved, detail: channel?.name || '' });
-    res.json(channel);
+    const backfill = await backfillChannel(sock, channel, { maxMessages: maxBackfill });
+    console.log(`📺 Channel followed: ${resolved} (backfill: ${backfill.indexed} indexed / ${backfill.fetched} fetched)`);
+    saveLog('channel.followed', { sender: resolved, detail: `${backfill.indexed} indexed` });
+    res.json({ ...channel, backfill });
   } catch (err) {
     console.error('❌ Channel follow failed:', err.message);
     res.status(500).json({ error: 'Failed to follow channel', details: err.message });

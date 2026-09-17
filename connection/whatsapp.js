@@ -143,6 +143,47 @@ export async function fetchRecentNewsletterMessages(sock, jid, count = 10) {
   return parseNewsletterFetchResult(result, jid);
 }
 
+// Walk a channel's whole message history with the server_id cursor, newest
+// page first. Stops when a page brings nothing new (exhausted, or the cursor
+// direction is unexpected) — dedupe by server_id keeps it safe either way.
+export async function fetchNewsletterHistory(sock, jid, { maxMessages = 500, pageSize = 50 } = {}) {
+  const seen = new Set();
+  const out = [];
+  let after;
+  while (out.length < maxMessages) {
+    const result = await sock.newsletterFetchMessages(jid, pageSize, undefined, after);
+    const updates = (result?.content || []).find(n => n.tag === 'message_updates');
+    const nodes = (updates?.content || []).filter(n => n.tag === 'message');
+    if (!nodes.length) break;
+    const before = out.length;
+    for (const node of nodes) {
+      const id = node.attrs.message_id || node.attrs.server_id;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const plaintext = (node.content || []).find(c => c.tag === 'plaintext');
+      if (!plaintext?.content) continue;
+      try {
+        const buf = typeof plaintext.content === 'string'
+          ? Buffer.from(plaintext.content, 'binary')
+          : Buffer.from(plaintext.content);
+        out.push({
+          key: { remoteJid: jid, id, fromMe: false },
+          message: proto.Message.decode(buf),
+          messageTimestamp: +(node.attrs.t || node.attrs.server_time || 0)
+        });
+      } catch {
+        // skip malformed entries
+      }
+    }
+    if (out.length === before) break; // page fully duplicate/empty → done
+    if (nodes.length < pageSize) break; // last page reached
+    const cursor = parseInt(nodes[nodes.length - 1]?.attrs?.server_id, 10);
+    if (!Number.isFinite(cursor) || cursor === after) break;
+    after = cursor;
+  }
+  return out;
+}
+
 // Accepts an @newsletter jid or an invite link (https://whatsapp.com/channel/<code>)
 export async function resolveChannelJid(sock, entry) {
   if (entry.endsWith('@newsletter')) return entry;
