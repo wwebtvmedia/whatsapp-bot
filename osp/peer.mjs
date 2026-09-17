@@ -28,8 +28,9 @@ async function retrieveFromBotMemory(query, topK = 3) {
   for (const search of [searchMemory, searchDocuments]) {
     try {
       const r = await search(query);
-      for (const ref of r.refs || []) {
-        const t = String(ref.text || '').trim();
+      // matches carries the chunk texts (refs is metadata-only)
+      for (const m of r.matches || []) {
+        const t = String(m || '').trim();
         if (t) texts.push(t);
       }
     } catch (err) {
