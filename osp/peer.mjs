@@ -100,11 +100,14 @@ export function getOspPeer() {
   return peer;
 }
 
-/** OSP_PEERS = JSON map nodeId → http base (e.g. {"osp-abc123":"http://192.168.1.10:8090"}) */
+/** OSP_PEERS = JSON map nodeId → url or {url, token} (link secret, optional). */
 function parseRemotes(spec) {
   if (!spec) return {};
-  try { return JSON.parse(spec) || {}; }
-  catch { console.warn('⚠️ OSP_PEERS is not valid JSON — ignored'); return {}; }
+  try {
+    const raw = JSON.parse(spec) || {};
+    return Object.fromEntries(Object.entries(raw).map(([id, v]) =>
+      [id, typeof v === 'string' ? { url: v } : v]));
+  } catch { console.warn('⚠️ OSP_PEERS is not valid JSON — ignored'); return {}; }
 }
 
 /**
@@ -139,6 +142,8 @@ export async function buildOspRouter(auth) {
         const texts = await retrieveFromBotMemory(String(pkt.payload.query_text));
         p.rag.entries.splice(0, p.rag.entries.length,
           ...texts.map(t => ({ hash: chunkHash(t), text: t, vec: embed(t) })));
+        const top = p.rag.retrieve(qv)[0]?.score ?? 0;
+        console.log(`🧩 OSP propose from ${pkt.originId}: "${String(pkt.payload.query_text).slice(0, 60)}" → ${texts.length} chunks, top_cover=${top}`);
       }
     }
     try {

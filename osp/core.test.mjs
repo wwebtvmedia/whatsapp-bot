@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   embed, similarity, chunkHash, canonicalJson, DevSigner, Packet, Action, Mode,
   Node, InMemoryHub, RagStore, EchoGroundedProvider, ConfabulatingProvider,
-  pyDouble, buildEnvelope, tokenize,
+  pyDouble, buildEnvelope, tokenize, queryCover,
 } from './core.mjs';
 
 const T1 = 'hydraulic pump failure is caused by cavitation and worn seals';
@@ -98,4 +98,27 @@ test('envelope neutralizes injected directives', () => {
 
 test('tokenize drops stopwords like the Python reference', () => {
   assert.deepEqual(tokenize('why does the hydraulic pump fail?'), ['hydraulic', 'pump', 'fail']);
+});
+
+test('queryCover matches Python golden values', () => {
+  // (query, chunk, cover) — same goldens as test_protocol.py / InteropTest.kt.
+  // The symmetric Jaccard would score the third case 0.286 despite a perfect
+  // grounding: query-side coverage is the competence metric, not Jaccard.
+  const goldens = [
+    ['x y', 'x z w v u', 0.5],
+    ['bionics', 'quantum pancake', 0.0],
+    ['robot exosquelette', "<le robot humanoïde et l'exosquelette tactile>", 1.0],
+    ['résumé document reçu', 'résumé du document reçu hier', 1.0],
+  ];
+  for (const [q, c, cover] of goldens) {
+    assert.equal(queryCover(embed(q), embed(c)), cover);
+  }
+});
+
+test('RagStore.retrieve ranks by query-side coverage', () => {
+  const rag = new RagStore(["<le robot humanoïde et l'exosquelette tactile>", 'quantum pancake']);
+  const hits = rag.retrieve(embed('robot exosquelette'));
+  assert.ok(hits.length > 0);
+  assert.equal(hits[0].score, 1.0);
+  assert.equal(hits[0].chunk.hash, chunkHash("<le robot humanoïde et l'exosquelette tactile>"));
 });

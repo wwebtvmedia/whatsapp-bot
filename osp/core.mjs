@@ -172,6 +172,22 @@ export function similarity(a, b) {
   return union === 0 ? 0.0 : inter / union;
 }
 
+/**
+ * Asymmetric query-side coverage: |q ∩ c| / |q| (Python `query_cover`).
+ * The symmetric Jaccard collapses when chunk ≫ query in token count — a full
+ * match on an 8-token question against a 120-token chunk scores ~0.03, under
+ * any sane bidMin. Competence is how much of the QUESTION a chunk can ground.
+ */
+export function queryCover(qv, cv) {
+  let qBits = 0;
+  for (const b of qv) qBits += popcount(b);
+  if (!qBits) return 0.0;
+  let hit = 0;
+  const n = Math.min(qv.length, cv.length);
+  for (let i = 0; i < n; i++) hit += popcount(qv[i] & cv[i]);
+  return hit / qBits;
+}
+
 function popcount(x) {
   let c = 0;
   while (x) { x &= x - 1; c++; }
@@ -322,7 +338,7 @@ export class RagStore {
   }
   retrieve(qv, topK = 3) {
     return this.entries
-      .map(c => ({ score: similarity(qv, c.vec), chunk: c }))
+      .map(c => ({ score: queryCover(qv, c.vec), chunk: c }))
       .filter(s => s.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
@@ -358,18 +374,26 @@ export class InMemoryHub {
  */
 export class HttpHub {
   constructor(resolveUrl, fetchImpl = globalThis.fetch) {
-    this.resolveUrl = resolveUrl;
+    this.resolveUrl = resolveUrl;      // nodeId → url string OR {url, token}
     this.fetch = fetchImpl;
     this.local = null;                 // set via join()
   }
   join(node) { node.hub = this; this.local = node; }
   peers() { return []; }             // HttpHub is addressed per-destination
   async send(_from, to, pkt) {
-    const url = this.resolveUrl(to);
-    if (!url) return null;
-    const res = await this.fetch(url, {
+    const r = this.resolveUrl(to);
+    if (!r) return null;
+    const { url, token } = typeof r === 'string' ? { url: r } : r;
+    const packetUrl = url.endsWith('/osp/packet') ? url : url.replace(/\/$/, '') + '/osp/packet';
+    const headers = { 'content-type': 'application/json' };
+    if (token) {
+      // both spellings so either server-side check accepts the same secret
+      headers['x-api-token'] = token;
+      headers['authorization'] = `Bearer ${token}`;
+    }
+    const res = await this.fetch(packetUrl, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify(pkt.toWire()),
     });
     if (res.status === 204) return null;
