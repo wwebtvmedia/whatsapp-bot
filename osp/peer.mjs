@@ -14,7 +14,7 @@
 
 import {
   Packet, Action, Mode, Node, DevSigner, D3Provider, RagStore, HttpHub,
-  buildEnvelope, chunkHash, embed,
+  buildEnvelope, chunkHash, embed, queryCover,
 } from './core.mjs';
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ import {
  * Order matters: with a top-K cut after the dedupe, conversation matches
  * would crowd out the indexed document chunks the query is actually about
  * (the model then honestly answers INSUFFICIENT_EVIDENCE with no evidence). */
-async function retrieveFromBotMemory(query, topK = 3) {
+async function retrieveFromBotMemory(query, topK = 4) {
   const { searchMemory, searchDocuments } = await import('../memorySearch.js');
   const texts = [];
   for (const search of [searchDocuments, searchMemory]) {
@@ -43,11 +43,39 @@ async function retrieveFromBotMemory(query, topK = 3) {
     }
   }
   // CPU inference budget: the envelope prefill dominates generation time, so
-  // each chunk travels truncated. The cited hash stays this node's own view
-  // of the chunk (GET_CHUNK serves the same text) — protocol-honest.
-  const capped = texts.map(t => (t.length > 600 ? t.slice(0, 600) : t));
-  return dedupe(capped).slice(0, topK);
+  // each chunk travels capped. 1200 keeps an indexed chunk whole (the
+  // extractor emits ~900-char chunks — the old 600 cap silently dropped a
+  // third of every chunk). The cited hash stays this node's own view of the
+  // chunk (GET_CHUNK serves the same text) — protocol-honest.
+  const capped = texts.map(t => (t.length > 1200 ? t.slice(0, 1200) : t));
+  return rerankByCover(query, dedupe(capped)).slice(0, topK);
 }
+
+/**
+ * Reorder chunks by the protocol's own competence metric before cutting to
+ * top-K: chroma's vector order drifts when the query language differs from
+ * the corpus (an English question over French PDFs pulled a whole OCR-noise
+ * document to the front), and whatever ranks first is what the LLM gets to
+ * ground on. queryCover is already the BID currency — reuse it for serving.
+ */
+export function rerankByCover(query, texts) {
+  const qv = embed(query);
+  return texts
+    .map(t => ({ t, cover: queryCover(qv, embed(t)) }))
+    .sort((a, b) => b.cover - a.cover)      // stable sort: ties keep chroma order
+    .map(e => e.t);
+}
+
+/**
+ * The grounding instruction makes the model answer exactly INSUFFICIENT_
+ * EVIDENCE when no chunk holds the answer. Letting that sentinel travel as a
+ * RESOLVE fails the origin's firewall (groundedness 0 → REJECTED) and docks
+ * the responder's reputation −0.20 for an honest abstention. Refuse instead:
+ * throwing here lands as RFO NO_QUORUM ('winner could not generate').
+ */
+const WRAPPER = '[\\s"\'«»“”*_`.!?-]*';
+const INSUFFICIENT_SENTINEL = new RegExp(`^${WRAPPER}(insufficient[_ -]?evidence)${WRAPPER}$`, 'i');
+export const isInsufficientEvidence = a => INSUFFICIENT_SENTINEL.test(String(a ?? ''));
 
 function dedupe(texts) {
   const seen = new Set();
@@ -88,6 +116,7 @@ export class BotLlmProvider extends D3Provider {
     const data = await res.json();
     const answer = data.choices?.[0]?.message?.content ?? data.message?.content;
     if (!answer) throw new Error('LLM returned no content');
+    if (isInsufficientEvidence(answer)) throw new Error('no answer in evidence');
     return { answer, provider: this.name, cost: { generations: 1 } };
   }
 }
