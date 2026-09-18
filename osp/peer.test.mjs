@@ -30,7 +30,9 @@ test('isInsufficientEvidence matches the sentinel, not real answers', () => {
     'Insufficient Evidence', '***INSUFFICIENT_EVIDENCE***']) {
     assert.ok(isInsufficientEvidence(a), `should match: ${a}`);
   }
-  for (const a of ['Le magazine s\'appelle « PLANÈTE ROBOTS ».',
+  // Negative fixtures keep the French guillemets: the wrapper class must
+  // strip punctuation, never swallow a real sentence around it.
+  for (const a of ['The magazine is called « PLANET ROBOTS ».',
     'INSUFFICIENT_EVIDENCE is not the answer here',
     'The full title is INSUFFICIENT_EVIDENCE-like, actually no', '']) {
     assert.ok(!isInsufficientEvidence(a), `should NOT match: ${a}`);

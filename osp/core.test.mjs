@@ -102,13 +102,15 @@ test('tokenize drops stopwords like the Python reference', () => {
 
 test('queryCover matches Python golden values', () => {
   // (query, chunk, cover) — same goldens as test_protocol.py / InteropTest.kt.
-  // The symmetric Jaccard would score the third case 0.286 despite a perfect
-  // grounding: query-side coverage is the competence metric, not Jaccard.
+  // The symmetric Jaccard would score cases three and four 0.75 despite a
+  // perfect grounding: query-side coverage is the competence metric, not
+  // Jaccard. Accented words stay in the fixtures on purpose: the tokenizer
+  // must survive non-ASCII.
   const goldens = [
     ['x y', 'x z w v u', 0.5],
     ['bionics', 'quantum pancake', 0.0],
-    ['robot exosquelette', "<le robot humanoïde et l'exosquelette tactile>", 1.0],
-    ['résumé document reçu', 'résumé du document reçu hier', 1.0],
+    ['café exoskeleton review', '<the café exoskeleton and its tactile review>', 1.0],
+    ['résumé document received', 'résumé of the document received yesterday', 1.0],
   ];
   for (const [q, c, cover] of goldens) {
     assert.equal(queryCover(embed(q), embed(c)), cover);
@@ -116,9 +118,9 @@ test('queryCover matches Python golden values', () => {
 });
 
 test('RagStore.retrieve ranks by query-side coverage', () => {
-  const rag = new RagStore(["<le robot humanoïde et l'exosquelette tactile>", 'quantum pancake']);
-  const hits = rag.retrieve(embed('robot exosquelette'));
+  const rag = new RagStore(['<the café exoskeleton and its tactile review>', 'quantum pancake']);
+  const hits = rag.retrieve(embed('café exoskeleton review'));
   assert.ok(hits.length > 0);
   assert.equal(hits[0].score, 1.0);
-  assert.equal(hits[0].chunk.hash, chunkHash("<le robot humanoïde et l'exosquelette tactile>"));
+  assert.equal(hits[0].chunk.hash, chunkHash('<the café exoskeleton and its tactile review>'));
 });

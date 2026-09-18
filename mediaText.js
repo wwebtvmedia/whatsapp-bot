@@ -397,9 +397,9 @@ export function writeExtractedTextFile(filePath, text, kind) {
   const outPath = `${filePath}.txt`;
   const viaOcr = kind === 'pdf-ocr' || kind === 'pdf-ocr+vision' || kind === 'ocr';
   const header = [
-    `# Texte extrait de ${path.basename(filePath)}`,
-    `# Méthode : ${viaOcr ? `OCR tesseract (${kind})` : kind}`,
-    `# Caractères : ${text.length}`,
+    `# Extracted text from ${path.basename(filePath)}`,
+    `# Method: ${viaOcr ? `OCR tesseract (${kind})` : kind}`,
+    `# Characters: ${text.length}`,
     '',
   ].join('\n');
   fs.writeFileSync(outPath, `${header}---\n${text}\n`, 'utf8');

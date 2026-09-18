@@ -211,12 +211,12 @@ test('Extracted text sidecar: written with method header, skipped when empty', (
     const out = writeExtractedTextFile(pdfPath, '[page 1] Hello world', 'pdf-ocr');
     assert.ok(out?.endsWith('doc.pdf.txt'));
     const content = fs.readFileSync(out, 'utf8');
-    assert.match(content, /# Texte extrait de doc\.pdf/);
-    assert.match(content, /# Méthode : OCR tesseract \(pdf-ocr\)/);
+    assert.match(content, /# Extracted text from doc\.pdf/);
+    assert.match(content, /# Method: OCR tesseract \(pdf-ocr\)/);
     assert.ok(content.includes('---\n[page 1] Hello world'));
     // native text layer: no OCR mention
     const nativeOut = writeExtractedTextFile(pdfPath, 'native text', 'pdf');
-    assert.match(fs.readFileSync(nativeOut, 'utf8'), /# Méthode : pdf\n/);
+    assert.match(fs.readFileSync(nativeOut, 'utf8'), /# Method: pdf\n/);
     // nothing extracted → no file
     assert.strictEqual(writeExtractedTextFile(pdfPath, '', 'pdf-no-text'), null);
     assert.strictEqual(fs.existsSync(path.join(dir, 'none.pdf.txt')), false);
