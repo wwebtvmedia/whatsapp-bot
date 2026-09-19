@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { embed } from './core.mjs';
-import { rerankByCover, isInsufficientEvidence } from './peer.mjs';
+import { rerankByCover, isInsufficientEvidence, dropUncovered } from './peer.mjs';
 
 test('rerankByCover puts the query-covering chunk first', () => {
   const query = 'planeterobots magazine subscription offer';
@@ -18,6 +18,19 @@ test('rerankByCover puts the query-covering chunk first', () => {
   ];
   const ranked = rerankByCover(query, chunks);
   assert.equal(ranked[0], chunks[1]);
+});
+
+test('dropUncovered removes filler once a chunk covers the query', () => {
+  const query = 'titre du nouveau magazine';
+  const chunks = [
+    '[Document x]\nTitre du document: TOUTES LES STRATÉGIES — titre',  // covers
+    'values.media élue agence média de l\'année, grand prix',          // filler
+    'communication RSE & sport, opérations spéciales',                 // filler
+  ];
+  assert.deepEqual(dropUncovered(query, chunks), [chunks[0]]);
+  // pure-semantic sets (nothing covers) pass untouched
+  const noCover = ['completely unrelated words', 'other different terms'];
+  assert.deepEqual(dropUncovered(query, noCover), noCover);
 });
 
 test('rerankByCover keeps the original order on zero coverage', () => {

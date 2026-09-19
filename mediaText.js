@@ -374,16 +374,48 @@ export function docMasthead(text) {
  * @param {string[]|null} articleTitles
  * @param {string} text
  * @param {string|null} masthead
+ * @param {string|null} language
  * @returns {string}
  */
-export function buildDocManifest(fileName, articleTitles, text, masthead) {
+export function buildDocManifest(fileName, articleTitles, text, masthead, language) {
   const parts = [`[Document ${fileName}]`];
   if (masthead) parts.push(`Titre du document: ${masthead}`);
+  if (language) parts.push(`Langue du document: ${languageName(language)}`);
   parts.push(String(text || '').slice(0, 400));
   const sommaire = [...new Set(articleTitles || [])].filter(Boolean).join(' | ').slice(0, 500);
   if (sommaire) parts.push(`Sommaire: ${sommaire}`);
   return parts.join('\n').slice(0, 1200);
 }
+
+// Unambiguous function words only: 'on', 'in', 'as'… exist in both languages
+// and would poison the counts on short queries.
+const FR_WORDS = new Set(['le', 'la', 'les', 'des', 'une', 'est', 'pour', 'dans', 'avec', 'que', 'qui', 'du', 'au', 'ce', 'il', 'elle', 'ne', 'pas', 'sur', 'plus', 'par', 'aux', 'cette', 'mais', 'nous', 'vous', 'sont', 'leur', 'dont', 'son', 'ses', 'notre', 'votre', 'été']);
+const EN_WORDS = new Set(['the', 'and', 'of', 'to', 'is', 'for', 'with', 'that', 'this', 'are', 'was', 'from', 'by', 'have', 'has', 'not', 'they', 'their', 'which', 'will', 'would', 'there', 'its', 'an']);
+
+/**
+ * Score a text's language by its function words (plus a French-diacritics
+ * tiebreaker English never shows). Inconclusive (too short, tied scores)
+ * returns null — callers must treat "unknown" as "don't translate".
+ * @param {string} text
+ * @param {{minWords?: number}} [opts]  documents default high, queries low
+ * @returns {'fr'|'en'|null}
+ */
+export function detectLanguage(text, { minWords = 20 } = {}) {
+  const raw = String(text || '');
+  const words = raw.toLowerCase().match(/[a-zà-ÿ']+/g) || [];
+  if (words.length < minWords) return null;
+  let fr = 0;
+  let en = 0;
+  for (const w of words) {
+    if (FR_WORDS.has(w)) fr++;
+    else if (EN_WORDS.has(w)) en++;
+  }
+  fr += (raw.match(/[àâäéèêëîïôöùûüç]/g) || []).length / 10;
+  if (fr === en) return null;
+  return fr > en ? 'fr' : 'en';
+}
+
+export const languageName = code => ({ fr: 'français', en: 'English' })[code] || String(code || '');
 
 /**
  * Give every article at least one chunk, share the rest proportionally to

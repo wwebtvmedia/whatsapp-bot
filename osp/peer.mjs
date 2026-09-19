@@ -26,29 +26,90 @@ import {
  * Order matters: with a top-K cut after the dedupe, conversation matches
  * would crowd out the indexed document chunks the query is actually about
  * (the model then honestly answers INSUFFICIENT_EVIDENCE with no evidence). */
+/** Chunks sharing no query token are filler once something does cover it:
+ * ads around the one useful chunk made the grounded model abstain. Sets with
+ * no covering chunk at all (pure-semantic hits) pass through untouched. */
+export function dropUncovered(query, texts) {
+  if (texts.length <= 1) return texts;
+  const qv = embed(query);
+  const covers = texts.map(t => queryCover(qv, embed(t)));
+  return covers.some(c => c > 0) ? texts.filter((_, i) => covers[i] > 0) : texts;
+}
+
+/** Small ollama call for query translation — never routes through the sealed
+ * generate() (this is preprocessing, not an answer). */
+async function translateText(text, targetLang) {
+  const name = targetLang === 'fr' ? 'français' : 'English';
+  const payload = {
+    ...(process.env.LLM_MODEL ? { model: process.env.LLM_MODEL } : {}),
+    messages: [{ role: 'user', content: `Translate to ${name}. Reply with the translation only, no quotes:\n\n${text}` }],
+    stream: false,
+    temperature: 0,
+    think: false,
+    options: { num_predict: 60 },
+  };
+  const res = await fetch(process.env.LLM_URL || 'http://localhost:11434/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(`LLM error (${res.status})`);
+  const data = await res.json();
+  const out = String(data.choices?.[0]?.message?.content ?? data.message?.content ?? '').trim();
+  if (!out) throw new Error('empty translation');
+  return out;
+}
+
 async function retrieveFromBotMemory(query, topK = 4) {
-  const { searchMemory, searchDocuments } = await import('../memorySearch.js');
-  const texts = [];
-  for (const search of [searchDocuments, searchMemory]) {
-    try {
-      const r = await search(query);
-      // matches carries the chunk texts (refs is metadata-only)
-      for (const m of r.matches || []) {
-        const t = String(m || '').trim();
-        if (t) texts.push(t);
+  const { searchMemory, searchDocuments, detectLanguage } = await import('../memorySearch.js');
+
+  const docLangs = new Set();
+  const retrieve = async (q) => {
+    const texts = [];
+    for (const search of [searchDocuments, searchMemory]) {
+      try {
+        const r = await search(q);
+        // searchDocuments reports the languages of the served chunks
+        for (const l of r.languages || []) docLangs.add(l);
+        // matches carries the chunk texts (refs is metadata-only)
+        for (const m of r.matches || []) {
+          const t = String(m || '').trim();
+          if (t) texts.push(t);
+        }
+      } catch (err) {
+        // retrieval failure degrades to fewer chunks, never to a fabricated one
+        console.warn('⚠️ OSP retrieval failed:', err.message);
       }
-    } catch (err) {
-      // retrieval failure degrades to fewer chunks, never to a fabricated one
-      console.warn('⚠️ OSP retrieval failed:', err.message);
+    }
+    // CPU inference budget: the envelope prefill dominates generation time, so
+    // each chunk travels capped. 1200 keeps an indexed chunk whole (the
+    // extractor emits ~900-char chunks — the old 600 cap silently dropped a
+    // third of every chunk). The cited hash stays this node's own view of the
+    // chunk (GET_CHUNK serves the same text) — protocol-honest.
+    const capped = texts.map(t => (t.length > 1200 ? t.slice(0, 1200) : t));
+    return dropUncovered(q, rerankByCover(q, dedupe(capped)).slice(0, topK));
+  };
+
+  let chunks = await retrieve(query);
+
+  // Embeddings and the lexical rerank are both language-bound: a query asked
+  // in another language than the corpus retrieves badly. Re-retrieve with the
+  // query translated into the documents' language; the envelope still carries
+  // the original wording (the model answers cross-language fine).
+  const qLang = detectLanguage(query, { minWords: 3 });
+  const docLang = [...docLangs][0];
+  if (qLang && docLang && qLang !== docLang) {
+    const translated = await translateText(query, docLang).catch(err => {
+      console.warn('⚠️ OSP query translation failed:', err.message);
+      return null;
+    });
+    if (translated && translated.toLowerCase() !== query.toLowerCase()) {
+      console.log(`🌐 OSP query translated (${qLang}→${docLang}): "${translated}"`);
+      chunks = await retrieve(translated);
     }
   }
-  // CPU inference budget: the envelope prefill dominates generation time, so
-  // each chunk travels capped. 1200 keeps an indexed chunk whole (the
-  // extractor emits ~900-char chunks — the old 600 cap silently dropped a
-  // third of every chunk). The cited hash stays this node's own view of the
-  // chunk (GET_CHUNK serves the same text) — protocol-honest.
-  const capped = texts.map(t => (t.length > 1200 ? t.slice(0, 1200) : t));
-  return rerankByCover(query, dedupe(capped)).slice(0, topK);
+  return chunks;
 }
 
 /**

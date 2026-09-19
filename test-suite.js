@@ -9,7 +9,7 @@ import { queryLLM } from './answerGenerator.js';
 import sharp from 'sharp';
 import { proto } from '@whiskeysockets/baileys';
 import { parseNewsletterFetchResult } from './connection/whatsapp.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc, docMasthead, buildDocManifest } from './mediaText.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc, docMasthead, buildDocManifest, detectLanguage } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -491,22 +491,38 @@ test('docMasthead: first meaningful line of the text wins over repeated captions
   assert.strictEqual(docMasthead('tiny'), null);
 });
 
+test('detectLanguage: function words and diacritics decide, short input is null', () => {
+  const fr = 'Le président de la république a déclaré, lors d\'une conférence de presse très suivie, que les entreprises françaises étaient prêtes à investir davantage dans la transition écologique et l\'innovation.';
+  const en = 'The president of the board announced during a press conference that the companies were ready to invest more in the transition and their innovation programs for the next year.';
+  assert.strictEqual(detectLanguage(fr), 'fr');
+  assert.strictEqual(detectLanguage(en), 'en');
+  // queries run with a lower word floor
+  assert.strictEqual(detectLanguage('titre du nouveau magazine', { minWords: 3 }), 'fr');
+  assert.strictEqual(detectLanguage('what is the title of the new magazine', { minWords: 3 }), 'en');
+  // tied scores are inconclusive — callers must not translate
+  assert.strictEqual(detectLanguage('hello world now', { minWords: 3 }), null);
+  assert.strictEqual(detectLanguage('hello', { minWords: 3 }), null);
+  assert.strictEqual(detectLanguage(''), null);
+});
+
 test('buildDocManifest: identity card with masthead, head of text and sommaire', () => {
   const text = 'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320 — cover body follows';
   const manifest = buildDocManifest(
     'AC2ABA04.Pdf',
     ['Article Alpha', 'Article Beta', 'Article Alpha'],
     text,
-    'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320'
+    'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320',
+    'fr'
   );
   assert.ok(manifest.startsWith('[Document AC2ABA04.Pdf]'));
   assert.ok(manifest.includes('Titre du document: TOUTES LES STRATÉGIES'));
+  assert.ok(manifest.includes('Langue du document: français'));
   // the title-bearing head comes before the sommaire, which is the least useful part
   assert.ok(manifest.indexOf('cover body') < manifest.indexOf('Sommaire:'));
   assert.ok(manifest.includes('Article Alpha | Article Beta')); // deduped
   assert.ok(manifest.length <= 1200);
   // no masthead and no TOC — filename + head of text is still a usable card
-  const bare = buildDocManifest('doc.pdf', null, text, null);
+  const bare = buildDocManifest('doc.pdf', null, text, null, null);
   assert.ok(bare.includes('[Document doc.pdf]') && bare.includes('cover body'));
-  assert.strictEqual(buildDocManifest('doc.pdf', null, '', null).trim(), '[Document doc.pdf]');
+  assert.strictEqual(buildDocManifest('doc.pdf', null, '', null, null).trim(), '[Document doc.pdf]');
 });

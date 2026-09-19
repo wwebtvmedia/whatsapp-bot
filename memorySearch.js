@@ -19,7 +19,7 @@ import {
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
-import { extractTextFromFile, chunkText, splitPdfByToc, allocateChunkBudget, docMasthead, buildDocManifest } from './mediaText.js';
+import { extractTextFromFile, chunkText, splitPdfByToc, allocateChunkBudget, docMasthead, buildDocManifest, detectLanguage } from './mediaText.js';
 
 dotenv.config();
 
@@ -216,12 +216,16 @@ export async function searchDocuments(query, { doc = null } = {}) {
   }));
 
   const { kept, context } = compressHits(hits);
-  return toResult(kept, context, {
+  const result = toResult(kept, context, {
     scope: 'documents',
     doc,
     vector: kept.filter(h => h.source === 'vector').length,
     lexical: kept.filter(h => h.source === 'lexical').length
   });
+  // languages of the served chunks — the OSP responder uses it to decide
+  // whether an incoming query needs translating before retrieval
+  result.languages = [...new Set(kept.map(h => h.meta?.language).filter(Boolean))];
+  return result;
 }
 
 /**
@@ -261,9 +265,13 @@ export async function indexDocumentChunks({ messageId, sender, day, ref, subject
   }
   if (!chunks.length) return { indexed: 0, kind, text: '' };
 
+  // The document's language rides on every chunk: the OSP responder translates
+  // queries asked in another language before re-retrieving.
+  const language = detectLanguage(text);
+
   // Identity-card chunk, appended last: filename, masthead, sommaire, head of
   // the text. searchDocuments serves it deterministically (see below).
-  chunks.push(buildDocManifest(fileName, articleTitles, text, docMasthead(text)));
+  chunks.push(buildDocManifest(fileName, articleTitles, text, docMasthead(text), language));
   if (articleTitles) articleTitles.push('Sommaire du document');
 
   const embeddings = await embedTexts(chunks);
@@ -273,6 +281,7 @@ export async function indexDocumentChunks({ messageId, sender, day, ref, subject
     embedding: embeddings[i],
     metadata: {
       sender, day, ref, subject, doc: fileName, info_type: 'document', chunk_index: i,
+      ...(language ? { language } : {}),
       ...(articleTitles ? { article: articleTitles[i].slice(0, 120) } : {}),
       ...(i === chunks.length - 1 ? { manifest: true } : {})
     }
