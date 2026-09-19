@@ -480,19 +480,19 @@ test('splitPdfByToc: cuts a generated magazine PDF into its articles', { skip: !
   }
 });
 
-test('docMasthead: the line repeated on the most pages wins, one-offs are ignored', () => {
+test('docMasthead: first meaningful line of the text wins over repeated captions', () => {
   const masthead = 'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320 – 17 SEPTEMBRE 2026';
-  const pages = Array.from({ length: 5 }, (_, i) => `${masthead}\nBody of page ${i}\nsome short ad`);
-  assert.strictEqual(docMasthead(pages.join('\n')), masthead);
-  // no furniture repeated enough — no masthead
-  assert.strictEqual(docMasthead('unique line one\nanother unique line'), null);
+  // repeated captions must NOT outrank the banner printed once on the cover
+  const text = `${masthead}\n« COVER HEADLINE »\nCHIFFRES CLÉS\nCHIFFRES CLÉS\nCHIFFRES CLÉS\nbody`;
+  assert.strictEqual(docMasthead(text), masthead);
+  // a first line too short to be a title is skipped, next line is taken
+  assert.strictEqual(docMasthead('ok\nPORTRAIT : SANDRINE ROUSTAN (RTBF), UNE FRANÇAISE'), 'PORTRAIT : SANDRINE ROUSTAN (RTBF), UNE FRANÇAISE');
   assert.strictEqual(docMasthead(''), null);
-  // a twice-repeated line under the default threshold stays ignored
-  assert.strictEqual(docMasthead(`${masthead}\n${masthead}\nbody`), null);
+  assert.strictEqual(docMasthead('tiny'), null);
 });
 
-test('buildDocManifest: identity card with masthead, sommaire and head of text', () => {
-  const text = 'CONSEIL : BIBORG CRÈVE L\'ÉCRAN AVEC 86DB. P.16 — cover body follows';
+test('buildDocManifest: identity card with masthead, head of text and sommaire', () => {
+  const text = 'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320 — cover body follows';
   const manifest = buildDocManifest(
     'AC2ABA04.Pdf',
     ['Article Alpha', 'Article Beta', 'Article Alpha'],
@@ -501,8 +501,9 @@ test('buildDocManifest: identity card with masthead, sommaire and head of text',
   );
   assert.ok(manifest.startsWith('[Document AC2ABA04.Pdf]'));
   assert.ok(manifest.includes('Titre du document: TOUTES LES STRATÉGIES'));
+  // the title-bearing head comes before the sommaire, which is the least useful part
+  assert.ok(manifest.indexOf('cover body') < manifest.indexOf('Sommaire:'));
   assert.ok(manifest.includes('Article Alpha | Article Beta')); // deduped
-  assert.ok(manifest.includes('cover body follows'));
   assert.ok(manifest.length <= 1200);
   // no masthead and no TOC — filename + head of text is still a usable card
   const bare = buildDocManifest('doc.pdf', null, text, null);

@@ -349,35 +349,25 @@ export function parseTocEntries(text, { maxPage = 999 } = {}) {
 }
 
 /**
- * Best-effort extraction of a document's running masthead: the line repeated
- * on the most pages ("TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320"). Short
- * documents without repeated furniture return null — the manifest then simply
- * goes without a title line.
+ * Best-effort extraction of a document's title banner: the first meaningful
+ * line of the extracted text (magazine covers put their masthead on top:
+ * "TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320 – 17 SEPTEMBRE 2026").
+ * Repetition counts are a trap here — recurring captions ("CHIFFRES CLÉS")
+ * outweigh a banner printed once. No meaningful first line → null.
  * @param {string} text
- * @param {{minRepeats?: number}} [opts]
  * @returns {string|null}
  */
-export function docMasthead(text, { minRepeats = 3 } = {}) {
-  const counts = new Map();
+export function docMasthead(text) {
   for (const rawLine of String(text || '').split('\n')) {
     const line = rawLine.replace(/\s+/g, ' ').trim();
-    if (line.length < 12 || line.length > 120) continue;
-    counts.set(line, (counts.get(line) || 0) + 1);
+    if (line.length >= 12 && line.length <= 120) return line;
   }
-  let best = null;
-  let bestCount = minRepeats - 1;
-  for (const [line, count] of counts) {
-    if (count > bestCount || (count === bestCount && best && line.length > best.length)) {
-      best = line;
-      bestCount = count;
-    }
-  }
-  return best;
+  return null;
 }
 
 /**
- * Build the identity-card chunk indexed with every document: filename, running
- * masthead, sommaire titles and the head of the text. Document-level questions
+ * Build the identity-card chunk indexed with every document: filename, title
+ * banner, head of the text and the sommaire titles. Document-level questions
  * ("what is this magazine about") are served from it deterministically — the
  * vector ranking alone rarely lifts cover or furniture chunks to the top.
  * @param {string} fileName
@@ -389,9 +379,9 @@ export function docMasthead(text, { minRepeats = 3 } = {}) {
 export function buildDocManifest(fileName, articleTitles, text, masthead) {
   const parts = [`[Document ${fileName}]`];
   if (masthead) parts.push(`Titre du document: ${masthead}`);
+  parts.push(String(text || '').slice(0, 400));
   const sommaire = [...new Set(articleTitles || [])].filter(Boolean).join(' | ').slice(0, 500);
   if (sommaire) parts.push(`Sommaire: ${sommaire}`);
-  parts.push(String(text || '').slice(0, 400));
   return parts.join('\n').slice(0, 1200);
 }
 
