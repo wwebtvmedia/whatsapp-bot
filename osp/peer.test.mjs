@@ -20,14 +20,20 @@ test('rerankByCover puts the query-covering chunk first', () => {
   assert.equal(ranked[0], chunks[1]);
 });
 
-test('dropUncovered removes filler once a chunk covers the query', () => {
+test('dropUncovered keeps chunks near the best coverage, drops the filler tail', () => {
   const query = 'titre du nouveau magazine';
   const chunks = [
-    '[Document x]\nTitre du document: TOUTES LES STRATÉGIES — titre',  // covers
+    '[Document x]\nTitre du document: TOUTES LES STRATÉGIES — titre',  // best cover
+    'programme nouveau spectacle titre affiche',                       // near-best, stays
     'values.media élue agence média de l\'année, grand prix',          // filler
-    'communication RSE & sport, opérations spéciales',                 // filler
   ];
-  assert.deepEqual(dropUncovered(query, chunks), [chunks[0]]);
+  const kept = dropUncovered(query, chunks);
+  assert.equal(kept.length, 2);
+  assert.equal(kept[0], chunks[0]);
+  assert.equal(kept[1], chunks[1]);
+  // a set of equally-covering hits passes whole
+  const equal = ['titre nouveau magazine', 'magazine nouveau titre'];
+  assert.deepEqual(dropUncovered(query, equal), equal);
   // pure-semantic sets (nothing covers) pass untouched
   const noCover = ['completely unrelated words', 'other different terms'];
   assert.deepEqual(dropUncovered(query, noCover), noCover);

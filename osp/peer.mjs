@@ -21,14 +21,18 @@ import {
 // Responder rungs — bot-local retrieval (chroma) + bot-local LLM (llama.cpp)
 // ---------------------------------------------------------------------------
 
-/** Chunks sharing no query token are filler once something does cover it:
- * ads around the one useful chunk made the grounded model abstain. Sets with
- * no covering chunk at all (pure-semantic hits) pass through untouched. */
+/** Chunks far below the best query coverage are filler: ads sharing a couple
+ * of common French words with the query made the grounded model abstain even
+ * with the answer literally in the first chunk. Chunks at ≥75% of the best
+ * coverage stay (a set of equally-covering hits passes whole); sets with no
+ * covering chunk at all (pure-semantic hits) pass through untouched. */
 export function dropUncovered(query, texts) {
   if (texts.length <= 1) return texts;
   const qv = embed(query);
   const covers = texts.map(t => queryCover(qv, embed(t)));
-  return covers.some(c => c > 0) ? texts.filter((_, i) => covers[i] > 0) : texts;
+  const best = Math.max(...covers);
+  if (best <= 0) return texts;
+  return texts.filter((_, i) => covers[i] >= 0.75 * best);
 }
 
 /** Small ollama call for query translation — never routes through the sealed
@@ -158,12 +162,13 @@ export class BotLlmProvider extends D3Provider {
     // think:false + options.num_predict: the ollama API ignores `max_tokens`,
     // and reasoning models (gemma4) then spend the whole budget thinking —
     // `content` came back EMPTY with done_reason:"length". Disabling the
-    // thinking channel returns a grounded answer in seconds.
+    // thinking channel returns a grounded answer in seconds. Low temperature:
+    // grounded extraction rambles about "corrupted data" at 0.7.
     const payload = {
       ...(this.model ? { model: this.model } : {}),
       messages: [{ role: 'user', content: envelope }],
       stream: false,
-      temperature: 0.7,
+      temperature: 0.2,
       max_tokens: 90,
       think: false,
       options: { num_predict: 150 },
