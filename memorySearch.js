@@ -19,7 +19,7 @@ import {
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
-import { extractTextFromFile, chunkText, splitPdfByToc, allocateChunkBudget } from './mediaText.js';
+import { extractTextFromFile, chunkText, splitPdfByToc, allocateChunkBudget, docMasthead, buildDocManifest } from './mediaText.js';
 
 dotenv.config();
 
@@ -182,6 +182,19 @@ export async function searchDocuments(query, { doc = null } = {}) {
   let vectorHits = { documents: [[]], metadatas: [[]], distances: [[]] };
   try {
     vectorHits = await queryChromaMessages(queryEmbedding, maxContextMessages, where);
+    // The manifest chunk carries the document's identity card (filename,
+    // masthead, sommaire): serve it ahead of the ranked article chunks so
+    // questions about the document itself never depend on the vector ranking.
+    const manifestWhere = doc
+      ? { $and: [{ info_type: 'document' }, { manifest: true }, { doc }] }
+      : { $and: [{ info_type: 'document' }, { manifest: true }] };
+    const manifestHits = await queryChromaMessages(queryEmbedding, 2, manifestWhere);
+    const prepend = (front, base) => ({
+      documents: [[...(front.documents?.[0] || []), ...(base.documents?.[0] || [])]],
+      metadatas: [[...(front.metadatas?.[0] || []), ...(base.metadatas?.[0] || [])]],
+      distances: [[...(front.distances?.[0] || []), ...(base.distances?.[0] || [])]]
+    });
+    if (manifestHits.documents?.[0]?.length) vectorHits = prepend(manifestHits, vectorHits);
   } catch (err) {
     console.error('❌ Document chunk search failed:', err.message);
   }
@@ -248,6 +261,11 @@ export async function indexDocumentChunks({ messageId, sender, day, ref, subject
   }
   if (!chunks.length) return { indexed: 0, kind, text: '' };
 
+  // Identity-card chunk, appended last: filename, masthead, sommaire, head of
+  // the text. searchDocuments serves it deterministically (see below).
+  chunks.push(buildDocManifest(fileName, articleTitles, text, docMasthead(text)));
+  if (articleTitles) articleTitles.push('Sommaire du document');
+
   const embeddings = await embedTexts(chunks);
   await upsertChromaDocChunks(chunks.map((chunk, i) => ({
     id: `${messageId}:chunk:${i}`,
@@ -255,7 +273,8 @@ export async function indexDocumentChunks({ messageId, sender, day, ref, subject
     embedding: embeddings[i],
     metadata: {
       sender, day, ref, subject, doc: fileName, info_type: 'document', chunk_index: i,
-      ...(articleTitles ? { article: articleTitles[i].slice(0, 120) } : {})
+      ...(articleTitles ? { article: articleTitles[i].slice(0, 120) } : {}),
+      ...(i === chunks.length - 1 ? { manifest: true } : {})
     }
   })));
 

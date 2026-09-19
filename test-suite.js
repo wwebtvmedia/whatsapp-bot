@@ -9,7 +9,7 @@ import { queryLLM } from './answerGenerator.js';
 import sharp from 'sharp';
 import { proto } from '@whiskeysockets/baileys';
 import { parseNewsletterFetchResult } from './connection/whatsapp.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc } from './mediaText.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc, docMasthead, buildDocManifest } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -478,4 +478,34 @@ test('splitPdfByToc: cuts a generated magazine PDF into its articles', { skip: !
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('docMasthead: the line repeated on the most pages wins, one-offs are ignored', () => {
+  const masthead = 'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320 – 17 SEPTEMBRE 2026';
+  const pages = Array.from({ length: 5 }, (_, i) => `${masthead}\nBody of page ${i}\nsome short ad`);
+  assert.strictEqual(docMasthead(pages.join('\n')), masthead);
+  // no furniture repeated enough — no masthead
+  assert.strictEqual(docMasthead('unique line one\nanother unique line'), null);
+  assert.strictEqual(docMasthead(''), null);
+  // a twice-repeated line under the default threshold stays ignored
+  assert.strictEqual(docMasthead(`${masthead}\n${masthead}\nbody`), null);
+});
+
+test('buildDocManifest: identity card with masthead, sommaire and head of text', () => {
+  const text = 'CONSEIL : BIBORG CRÈVE L\'ÉCRAN AVEC 86DB. P.16 — cover body follows';
+  const manifest = buildDocManifest(
+    'AC2ABA04.Pdf',
+    ['Article Alpha', 'Article Beta', 'Article Alpha'],
+    text,
+    'TOUTES LES STRATÉGIES POUR RÉUSSIR N° 2319-2320'
+  );
+  assert.ok(manifest.startsWith('[Document AC2ABA04.Pdf]'));
+  assert.ok(manifest.includes('Titre du document: TOUTES LES STRATÉGIES'));
+  assert.ok(manifest.includes('Article Alpha | Article Beta')); // deduped
+  assert.ok(manifest.includes('cover body follows'));
+  assert.ok(manifest.length <= 1200);
+  // no masthead and no TOC — filename + head of text is still a usable card
+  const bare = buildDocManifest('doc.pdf', null, text, null);
+  assert.ok(bare.includes('[Document doc.pdf]') && bare.includes('cover body'));
+  assert.strictEqual(buildDocManifest('doc.pdf', null, '', null).trim(), '[Document doc.pdf]');
 });
