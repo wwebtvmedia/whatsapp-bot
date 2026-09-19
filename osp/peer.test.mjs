@@ -15,10 +15,12 @@ test('focusDocument anchors on a manifest, drops other-document filler', () => {
   const docA = 'sommaire : la com à l\'école de l\'IA';
   const docB = 'abonnement renouvelé planeterobots.com contact';
   const docOf = new Map([[manifest, 'A.Pdf'], [docA, 'A.Pdf'], [robots, 'B.Pdf'], [docB, 'B.Pdf']]);
-  // manifest first: its document stays whole, foreign filler goes
-  assert.deepEqual(focusDocument([manifest, docB, docA, robots], docOf), [manifest, docA, robots]);
+  // manifest first: a document-level query gets manifests ONLY — same-document
+  // ad chunks still made the model abstain on a third of draws. Every other
+  // manifest stays: a "list the documents" query needs them all.
+  assert.deepEqual(focusDocument([manifest, docB, docA, robots], docOf), [manifest, robots]);
   // a foreign chunk outranking the manifest still anchors on the manifest
-  assert.deepEqual(focusDocument([docB, manifest, robots], docOf), [docB, manifest, robots].filter(t => t !== docB));
+  assert.deepEqual(focusDocument([docB, manifest, robots], docOf), [manifest, robots]);
   // content query, no manifest in sight: the best hit's doc is the anchor
   assert.deepEqual(focusDocument([docB, docA], docOf), [docB]);
   // unidentifiable hits (chat memory): untouched

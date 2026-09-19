@@ -80,12 +80,15 @@ async function translateText(text, targetLang) {
 /** Doc-level focus: chunks from a document other than the anchor's are
  * conflicting identity evidence — with two new magazines indexed, "titre du
  * magazine" made the model pick the wrong title or abstain. The anchor is the
- * first manifest among the ranked hits (its presence marks a document-level
- * query; foreign-document chunks outranking it at the rerank is exactly the
- * drift this guards against), else the best hit. Same-document chunks stay,
- * any other manifest stays (a competing doc may legitimately be the answer). */
+ * first manifest among the ranked hits; its presence marks a document-level
+ * query, and then ONLY manifests are served — same-document ad chunks made
+ * gemma abstain on a third of draws even with the title in chunk #1. Without
+ * a manifest anchor, the best hit's document mates stay (content queries). */
 export function focusDocument(ranked, docOf) {
   const anchor = ranked.find(t => t.startsWith('[Document ')) || ranked[0];
+  if (anchor.startsWith('[Document ')) {
+    return ranked.filter(t => t.startsWith('[Document '));
+  }
   const bestDoc = docOf.get(anchor);
   if (!bestDoc) return ranked;
   return ranked.filter(t => docOf.get(t) === bestDoc || t.startsWith('[Document '));
