@@ -35,6 +35,11 @@ export function dropUncovered(query, texts) {
   return texts.filter((_, i) => covers[i] >= 0.75 * best);
 }
 
+// Set by the /packet handler when retrieval translated the query: the sealed
+// generation grounds on the translated wording (same intent, corpus language).
+// Cleared right after use — packets are served one at a time in practice.
+let envelopeQueryOverride = null;
+
 /** Small ollama call for query translation — never routes through the sealed
  * generate() (this is preprocessing, not an answer). */
 async function translateText(text, targetLang) {
@@ -98,11 +103,13 @@ export async function retrieveFromBotMemory(query, topK = 4) {
   };
 
   let chunks = await retrieve(query);
+  let effectiveQuery = query;
 
   // Embeddings and the lexical rerank are both language-bound: a query asked
   // in another language than the corpus retrieves badly. Re-retrieve with the
-  // query translated into the documents' language; the envelope still carries
-  // the original wording (the model answers cross-language fine).
+  // query translated into the documents' language — and let the generation be
+  // grounded on the translated wording too (an English question over French
+  // evidence otherwise makes gemma echo the question instead of answering).
   const qLang = detectLanguage(query, { minWords: 3 });
   const docLang = [...docLangs][0];
   if (qLang && docLang && qLang !== docLang) {
@@ -112,10 +119,11 @@ export async function retrieveFromBotMemory(query, topK = 4) {
     });
     if (translated && translated.toLowerCase() !== query.toLowerCase()) {
       console.log(`🌐 OSP query translated (${qLang}→${docLang}): "${translated}"`);
+      effectiveQuery = translated;
       chunks = await retrieve(translated);
     }
   }
-  return chunks;
+  return { texts: chunks, query: effectiveQuery };
 }
 
 /**
@@ -158,7 +166,8 @@ export class BotLlmProvider extends D3Provider {
   }
 
   async generate(query, chunks) {
-    const envelope = buildEnvelope(query, chunks);
+    const envelope = buildEnvelope(envelopeQueryOverride || query, chunks);
+    envelopeQueryOverride = null;
     // think:false + options.num_predict: the ollama API ignores `max_tokens`,
     // and reasoning models (gemma4) then spend the whole budget thinking —
     // `content` came back EMPTY with done_reason:"length". Disabling the
@@ -253,17 +262,19 @@ export async function buildOspRouter(auth) {
     if (pkt.action === Action.PROPOSE || pkt.action === Action.RESOLVE) {
       const qv = embed(String(pkt.payload?.query_text ?? ''));
       if (qv.some(b => b !== 0)) {
-        const texts = await retrieveFromBotMemory(String(pkt.payload.query_text));
+        const { texts, query: effectiveQuery } = await retrieveFromBotMemory(String(pkt.payload.query_text));
         p.rag.entries.splice(0, p.rag.entries.length,
           ...texts.map(t => ({ hash: chunkHash(t), text: t, vec: embed(t) })));
         const top = p.rag.retrieve(qv)[0]?.score ?? 0;
         console.log(`🧩 OSP propose from ${pkt.originId}: "${String(pkt.payload.query_text).slice(0, 60)}" → ${texts.length} chunks, top_cover=${top}`);
+        envelopeQueryOverride = effectiveQuery !== String(pkt.payload.query_text) ? effectiveQuery : null;
       }
     }
     try {
       // onResolve is async (LLM generation) — await keeps the wire contract:
       // one sealed reply packet per request
       const reply = await p.responder.onPacket(pkt);
+      envelopeQueryOverride = null;
       if (!reply) return res.status(204).end();      // forged/replayed — silent
       const head = String(reply.payload?.answer ?? '').slice(0, 120).replace(/\s+/g, ' ');
       console.log(`↩️ OSP reply to ${pkt.originId}: ${reply.action} ${reply.payload?.reason ?? reply.payload?.bid ?? ''}${head ? ` | "${head}"` : ''} prov=${(reply.payload?.provenance ?? []).length}`);
