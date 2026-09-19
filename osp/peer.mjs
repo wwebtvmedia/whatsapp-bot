@@ -21,11 +21,6 @@ import {
 // Responder rungs — bot-local retrieval (chroma) + bot-local LLM (llama.cpp)
 // ---------------------------------------------------------------------------
 
-/** Pull this bot's own memory for a query: documents first, then chats.
- *
- * Order matters: with a top-K cut after the dedupe, conversation matches
- * would crowd out the indexed document chunks the query is actually about
- * (the model then honestly answers INSUFFICIENT_EVIDENCE with no evidence). */
 /** Chunks sharing no query token are filler once something does cover it:
  * ads around the one useful chunk made the grounded model abstain. Sets with
  * no covering chunk at all (pure-semantic hits) pass through untouched. */
@@ -61,8 +56,15 @@ async function translateText(text, targetLang) {
   return out;
 }
 
-async function retrieveFromBotMemory(query, topK = 4) {
-  const { searchMemory, searchDocuments, detectLanguage } = await import('../memorySearch.js');
+/** Pull this bot's own memory for a query: documents first, then chats.
+ *
+ * Order matters: with a top-K cut after the dedupe, conversation matches
+ * would crowd out the indexed document chunks the query is actually about
+ * (the model then honestly answers INSUFFICIENT_EVIDENCE with no evidence).
+ * Exported for replay tooling: this is exactly what an inbound packet gets. */
+export async function retrieveFromBotMemory(query, topK = 4) {
+  const { searchMemory, searchDocuments } = await import('../memorySearch.js');
+  const { detectLanguage } = await import('../mediaText.js');
 
   const docLangs = new Set();
   const retrieve = async (q) => {
