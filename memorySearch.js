@@ -19,7 +19,7 @@ import {
   dayKey
 } from './storage/database.js';
 import { routeQuery } from './classifier.js';
-import { extractTextFromFile, chunkText } from './mediaText.js';
+import { extractTextFromFile, chunkText, splitPdfByToc, allocateChunkBudget } from './mediaText.js';
 
 dotenv.config();
 
@@ -214,15 +214,38 @@ export async function searchDocuments(query, { doc = null } = {}) {
 /**
  * Extract the text of a received document, chunk it and index every chunk so
  * questions about the document's content are answerable through searchMemory.
+ * Magazine-style PDFs are split by their own table of contents when one is
+ * found: chunks stay inside one article and carry the article title, which
+ * both sharpens retrieval and lets answers cite the article (and page).
  * @param {{messageId: string, sender: string, day: string, ref: string, subject: string,
  *          filePath: string, fileName: string}} doc
- * @returns {Promise<{indexed: number, kind: string, text: string}>}
+ * @returns {Promise<{indexed: number, kind: string, text: string, articles?: number}>}
  */
 export async function indexDocumentChunks({ messageId, sender, day, ref, subject, filePath, fileName }) {
   const { text, kind } = await extractTextFromFile(filePath, { ocrEnabled, ocrLang });
   if (!text) return { indexed: 0, kind, text: '' };
 
-  const chunks = chunkText(text, { maxChunks: maxDocChunks });
+  // Chunk per TOC article when the document has one; each article gets a
+  // length-proportional share of the global chunk budget, min 1 chunk.
+  const articles = await splitPdfByToc(filePath);
+  const hasToc = Array.isArray(articles) && articles.length >= 2;
+  let chunks;
+  let articleTitles = null;
+  if (hasToc) {
+    const budget = allocateChunkBudget(articles, maxDocChunks);
+    chunks = [];
+    articleTitles = [];
+    let chunkIndex = 0;
+    articles.forEach((article, a) => {
+      const parts = chunkText(article.text, { maxChunks: budget[a] });
+      articleTitles.push(...parts.map(() => article.title));
+      chunkIndex += parts.length;
+      chunks.push(...parts);
+    });
+    console.log(`📑 TOC split: ${articles.length} article(s), budget ${budget.join('/')}`);
+  } else {
+    chunks = chunkText(text, { maxChunks: maxDocChunks });
+  }
   if (!chunks.length) return { indexed: 0, kind, text: '' };
 
   const embeddings = await embedTexts(chunks);
@@ -230,8 +253,11 @@ export async function indexDocumentChunks({ messageId, sender, day, ref, subject
     id: `${messageId}:chunk:${i}`,
     text: chunk,
     embedding: embeddings[i],
-    metadata: { sender, day, ref, subject, doc: fileName, info_type: 'document', chunk_index: i }
+    metadata: {
+      sender, day, ref, subject, doc: fileName, info_type: 'document', chunk_index: i,
+      ...(articleTitles ? { article: articleTitles[i].slice(0, 120) } : {})
+    }
   })));
 
-  return { indexed: chunks.length, kind, text };
+  return { indexed: chunks.length, kind, text, articles: hasToc ? articles.length : undefined };
 }

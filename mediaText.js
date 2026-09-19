@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile);
 
 const TEXT_EXTENSIONS = ['.txt', '.md', '.csv', '.json', '.log', '.xml', '.html'];
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'];
-const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_FILE_BYTES = parseInt(process.env.MEDIA_MAX_FILE_BYTES || '', 10) || 25 * 1024 * 1024;
 // Scanned PDFs are rasterized then OCR'd page by page — this bounds the work
 const MAX_PDF_OCR_PAGES = parseInt(process.env.MEDIA_PDF_OCR_PAGES || '30', 10);
 // 300 dpi is what newspaper-size body text (8-9pt) needs to come out readable;
@@ -301,6 +301,132 @@ async function describeImage(imagePath) {
   if (!response.ok) throw new Error(`Vision API error (${response.status})`);
   const data = await response.json();
   return (data.message?.content || '').trim();
+}
+
+// A table of contents with fewer entries than this is indistinguishable from
+// cover-page teasers ("BIG INTERVIEW P.38") — don't split on it.
+const TOC_MIN_ENTRIES = 4;
+
+/**
+ * Parse a magazine-style table of contents into {title, page} entries.
+ * Two line shapes are trusted, everything else is noise:
+ *   - explicit page marker: "CONSEIL : BIBORG … 86DB. P.16" / "Titre page 12".
+ *     The marker may sit mid-line: pdftotext -layout merges TOC columns, so
+ *     "AVEC LES MARQUES »   P.6   (text from the neighbouring column)" is a
+ *     valid entry and only the text before the marker is the title.
+ *   - dot leaders:          "Titre ........ 12"
+ * @param {string} text
+ * @param {{maxPage?: number}} [opts] clamp to the real page count
+ * @returns {{title: string, page: number}[]}
+ */
+export function parseTocEntries(text, { maxPage = 999 } = {}) {
+  const marker = /(?:\b[Pp]\.|\b[Pp]age\b)\s*(\d{1,3})|[.…·]{3,}\s*(\d{1,3})\s*$/;
+  const entries = [];
+  const seenPages = new Set();
+
+  for (const rawLine of (text || '').split('\n')) {
+    const line = rawLine.replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    const match = marker.exec(line);
+    if (!match) continue;
+    const page = parseInt(match[1] || match[2], 10);
+    if (page < 1 || page > maxPage || seenPages.has(page)) continue;
+
+    const title = line.slice(0, match.index)
+      // strip trailing dot leaders and dashes, but keep a sentence-ending dot
+      .replace(/(?:[.…·]{2,}|[—–-])+\s*$/, '')
+      .trim();
+    // titles that are just a number or too short are usually page furniture
+    if (title.length < 4 || /^\d+$/.test(title)) continue;
+
+    seenPages.add(page);
+    entries.push({ title, page });
+  }
+
+  // a real table of contents is ordered; tolerate unsorted input, reject chaos
+  entries.sort((a, b) => a.page - b.page);
+  return entries;
+}
+
+/**
+ * Give every article at least one chunk, share the rest proportionally to
+ * text length, then trim the largest allocations until the budget holds.
+ * @param {{text: string}[]} articles
+ * @param {number} maxChunks
+ * @returns {number[]}
+ */
+export function allocateChunkBudget(articles, maxChunks) {
+  const total = articles.reduce((sum, a) => sum + a.text.length, 0) || 1;
+  const budget = articles.map(a => Math.max(1, Math.round(maxChunks * a.text.length / total)));
+  let sum = budget.reduce((a, b) => a + b, 0);
+  while (sum > maxChunks) {
+    const idx = budget.indexOf(Math.max(...budget));
+    if (budget[idx] <= 1) break;
+    budget[idx]--;
+    sum--;
+  }
+  return budget;
+}
+
+/**
+ * Split a PDF into its articles using its own table of contents. Returns null
+ * when no reliable TOC is found — callers fall back to plain whole-document
+ * chunking. Page texts are prefixed with "[page N]" so indexed chunks can
+ * quote a page like the OCR path does.
+ *
+ * The cover page usually carries 2-4 teasers with page numbers ("INTERVIEW
+ * P.38") that would wreck a naive parse, so the head pages are scored
+ * individually (layout-preserving extraction) and only the page(s) carrying
+ * the densest TOC — plus adjacent pages of at least half that density — feed
+ * the parser.
+ * @param {string} filePath
+ * @param {{headPages?: number}} [opts]
+ * @returns {Promise<{title: string, startPage: number, endPage: number, text: string}[]|null>}
+ */
+export async function splitPdfByToc(filePath, { headPages = 6 } = {}) {
+  try {
+    if (path.extname(filePath).toLowerCase() !== '.pdf' || !fs.existsSync(filePath)) return null;
+
+    // full text in page buckets — the article content itself
+    const raw = (await execFileAsync('pdftotext', [filePath, '-'])).stdout;
+    const pages = raw.split('\f').map(p => p.replace(/\s+$/, ''));
+    // pdftotext ends the output with a form feed — the split leaves an empty tail
+    if (pages.length > 1 && pages[pages.length - 1] === '') pages.pop();
+    const numpages = Math.max(pages.length, 1);
+
+    // layout-preserving extraction of the head pages, scored one page at a time
+    const layoutRaw = (await execFileAsync('pdftotext', ['-layout', '-f', '1', '-l', String(headPages), filePath, '-'])).stdout;
+    const layoutPages = layoutRaw.split('\f').map(p => p.replace(/\s+$/, ''));
+    if (layoutPages.length > 1 && layoutPages[layoutPages.length - 1] === '') layoutPages.pop();
+    const perPage = layoutPages.map(t => parseTocEntries(t, { maxPage: numpages }));
+
+    const best = Math.max(...perPage.map(e => e.length), 0);
+    if (best < TOC_MIN_ENTRIES) return null;
+    // the TOC may span two facing pages; absorb neighbours of half the density
+    let lo = perPage.findIndex(e => e.length === best);
+    let hi = lo;
+    const minKeep = Math.max(2, Math.ceil(best / 2));
+    while (lo > 0 && perPage[lo - 1].length >= minKeep) lo--;
+    while (hi < perPage.length - 1 && perPage[hi + 1].length >= minKeep) hi++;
+    const toc = parseTocEntries(layoutPages.slice(lo, hi + 1).join('\n'), { maxPage: numpages });
+    if (toc.length < TOC_MIN_ENTRIES) return null;
+
+    const articles = [];
+    for (let i = 0; i < toc.length; i++) {
+      const start = toc[i].page;
+      const end = (i + 1 < toc.length ? toc[i + 1].page : numpages + 1) - 1;
+      if (end < start) continue;
+      const text = pages.slice(start - 1, end)
+        .map((pageText, j) => `[page ${start + j}] ${pageText}`)
+        .join('\n')
+        .trim();
+      if (text) articles.push({ title: toc[i].title, startPage: start, endPage: end, text });
+    }
+    return articles.length >= 2 ? articles : null;
+  } catch (err) {
+    console.error(`❌ TOC split failed for ${path.basename(filePath)}:`, err.message);
+    return null;
+  }
 }
 
 /**

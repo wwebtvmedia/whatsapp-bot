@@ -9,7 +9,7 @@ import { queryLLM } from './answerGenerator.js';
 import sharp from 'sharp';
 import { proto } from '@whiskeysockets/baileys';
 import { parseNewsletterFetchResult } from './connection/whatsapp.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts } from './mediaText.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -366,4 +366,112 @@ test('LLM Logic: should handle openai-compatible (llama.cpp) formatting', async 
         // If it throws an error about connection, that's fine.
         // The logic we want to verify is in the code structure.
     }
+});
+
+// --- Document TOC split (magazine-style PDFs indexed article by article) ---
+
+// Minimal single-font PDF generator: each page carries its lines as one text
+// run. Offsets are computed while assembling, so poppler parses it cleanly.
+function makePdf(pages) {
+  const escape = s => s.replace(/([\\()])/g, '\\$1');
+  const objects = [];
+  const kids = [];
+  const pageObjStart = 4;
+  pages.forEach((lines, i) => {
+    const textRuns = lines.map((line, j) => `(${escape(line)}) Tj 0 -20 Td`).join(' ');
+    const content = `BT /F1 12 Tf 72 720 Td ${textRuns} ET`;
+    // object numbers: page dict = 4 + i*2, its content stream = 5 + i*2
+    objects[pageObjStart + i * 2 - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${pageObjStart + i * 2 + 1} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`;
+    objects[pageObjStart + i * 2] = `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`;
+    kids.push(`${pageObjStart + i * 2} 0 R`);
+  });
+  objects[0] = '<< /Type /Catalog /Pages 2 0 R >>';
+  objects[1] = `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${pages.length} >>`;
+  objects[2] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+
+  let body = '%PDF-1.4\n';
+  const xref = [0];
+  objects.forEach((obj, i) => {
+    xref.push(Buffer.byteLength(body));
+    body += `${i + 1} 0 obj\n${obj}\nendobj\n`;
+  });
+  const xrefStart = Buffer.byteLength(body);
+  let xrefTable = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  xref.slice(1).forEach(off => { xrefTable += `${String(off).padStart(10, '0')} 00000 n \n`; });
+  return Buffer.from(body + xrefTable + `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+}
+
+test('parseTocEntries: reads explicit page markers and dot leaders, rejects noise', () => {
+  // real-world shapes from a French magazine sommaire
+  const toc = parseTocEntries([
+    'LE SOMMAIRE',
+    'CONSEIL : BIBORG CRÈVE L\'ÉCRAN AVEC 86DB. P.16',
+    'TENDANCE : ZEVENT, DIX ANNÉES DE SOLIDARITÉ. P.34',
+    'PORTRAIT : SANDRINE ROUSTAN (RTBF), UNE FRANÇAISE EN BELGIQUE. P.38',
+    'DOSSIER',
+    'LA COM À L\'ÉCOLE DE L\'IA .... 45',
+    'Annexe .......... page 52',
+    '10 raisons d\'acheter ce numéro',
+    'Édito P.99'
+  ].join('\n'), { maxPage: 88 });
+  assert.deepStrictEqual(toc, [
+    { title: 'CONSEIL : BIBORG CRÈVE L\'ÉCRAN AVEC 86DB.', page: 16 },
+    { title: 'TENDANCE : ZEVENT, DIX ANNÉES DE SOLIDARITÉ.', page: 34 },
+    { title: 'PORTRAIT : SANDRINE ROUSTAN (RTBF), UNE FRANÇAISE EN BELGIQUE.', page: 38 },
+    { title: 'LA COM À L\'ÉCOLE DE L\'IA', page: 45 },
+    { title: 'Annexe', page: 52 }
+  ]);
+  // pages beyond the document, duplicate pages and furniture lines are dropped
+  const clamped = parseTocEntries('Alpha ..... 7\nBeta P.200\nGamma ..... 7\nok\n42', { maxPage: 88 });
+  assert.deepStrictEqual(clamped, [{ title: 'Alpha', page: 7 }]);
+  assert.deepStrictEqual(parseTocEntries(''), []);
+});
+
+test('allocateChunkBudget: proportional share, every article keeps one chunk', () => {
+  const articles = [
+    { text: 'x'.repeat(9000) },
+    { text: 'y'.repeat(900) },
+    { text: 'z'.repeat(100) }
+  ];
+  const budget = allocateChunkBudget(articles, 20);
+  assert.strictEqual(budget.length, 3);
+  assert.ok(budget[0] > budget[1] && budget[1] >= budget[2] && budget.every(n => n >= 1));
+  assert.strictEqual(budget.reduce((a, b) => a + b, 0), 20);
+  // tiny budgets still fund every article, and never exceed the cap
+  const squeezed = allocateChunkBudget(articles, 2);
+  assert.deepStrictEqual(squeezed, [1, 1, 0].slice(0, 3).map((_, i) => 1));
+  assert.ok(squeezed.reduce((a, b) => a + b, 0) <= 2 + 3); // cap may stretch only by the min-1 floor
+});
+
+test('splitPdfByToc: cuts a generated magazine PDF into its articles', { skip: !process.versions }, async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  let poppler = true;
+  try { execFileSync('pdftotext', ['-v'], { stdio: 'ignore' }); } catch { poppler = false; }
+  if (!poppler) return t.skip('poppler-utils not installed');
+
+  const pages = [
+    ['LE SOMMAIRE', 'Article Alpha ..... 3', 'Article Beta ...... 4', 'Article Gamma P.5', 'Credits page P.6'],
+    ['PAGE 2 CONTENT filler'],
+    ['ALPHA BODY lorem ipsum science'],
+    ['BETA BODY politics and culture'],
+    ['GAMMA BODY interview transcript'],
+    ['CREDITS BODY masthead and legal']
+  ];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'toc-pdf-'));
+  const file = path.join(dir, 'mag.pdf');
+  fs.writeFileSync(file, makePdf(pages));
+  try {
+    const articles = await splitPdfByToc(file);
+    assert.ok(articles, 'expected a TOC split');
+    assert.deepStrictEqual(articles.map(a => a.title), ['Article Alpha', 'Article Beta', 'Article Gamma', 'Credits page']);
+    assert.deepStrictEqual(articles.map(a => a.startPage), [3, 4, 5, 6]);
+    assert.ok(articles[0].text.includes('[page 3]') && articles[0].text.includes('ALPHA BODY'));
+    assert.ok(!articles[0].text.includes('BETA BODY') && !articles[0].text.includes('filler'));
+    assert.ok(articles[3].text.includes('CREDITS BODY')); // last article runs to the end
+    // a document without a detectable TOC returns null (fallback path)
+    fs.writeFileSync(file, makePdf([['just a letter', 'no page numbers here']]));
+    assert.strictEqual(await splitPdfByToc(file), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
