@@ -7,7 +7,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { embed } from './core.mjs';
-import { rerankByCover, isInsufficientEvidence, dropUncovered } from './peer.mjs';
+import { rerankByCover, isInsufficientEvidence, dropUncovered, focusDocument } from './peer.mjs';
+
+test('focusDocument keeps the best hit document, drops other-document filler', () => {
+  const manifest = '[Document STRAT.Pdf]\nTitre du document: TOUTES LES STRATÉGIES';
+  const chunks = [
+    manifest,                                                        // best: doc A manifest
+    'abonnement renouvelé planeterobots.com contact',                // doc B article
+    'sommaire : la com à l\'école de l\'IA',                         // doc A article
+    '[Document ROBOTS.Pdf]\nTitre du document: PLANÈTE ROBOTS N°99', // doc B manifest
+  ];
+  const docOf = new Map([[chunks[0], 'A.Pdf'], [chunks[1], 'B.Pdf'], [chunks[2], 'A.Pdf'], [chunks[3], 'B.Pdf']]);
+  // the best chunk's doc stays whole, a competing manifest survives (it may
+  // legitimately be the answer), other-document filler goes
+  assert.deepEqual(focusDocument(chunks, docOf), [chunks[0], chunks[2], chunks[3]]);
+  // unidentifiable best hit (chat memory): untouched
+  const mixed = ['chat line', 'another chat line'];
+  assert.deepEqual(focusDocument(mixed, new Map()), mixed);
+});
 
 test('rerankByCover puts the query-covering chunk first', () => {
   const query = 'planeterobots magazine subscription offer';

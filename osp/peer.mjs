@@ -77,6 +77,17 @@ async function translateText(text, targetLang) {
   return out;
 }
 
+/** Doc-level focus: chunks from a document other than the best hit's are
+ * conflicting identity evidence — with two new magazines indexed, "titre du
+ * magazine" made the model pick the wrong title or abstain. Keep the best
+ * chunk's document mates, the best chunk itself, and any other document
+ * manifest (a competing doc may legitimately be the answer). */
+export function focusDocument(ranked, docOf) {
+  const bestDoc = docOf.get(ranked[0]);
+  if (!bestDoc) return ranked;
+  return ranked.filter((t, i) => i === 0 || docOf.get(t) === bestDoc || t.startsWith('[Document '));
+}
+
 /** Pull this bot's own memory for a query: documents first, then chats.
  *
  * Order matters: with a top-K cut after the dedupe, conversation matches
@@ -89,17 +100,17 @@ export async function retrieveFromBotMemory(query, topK = 4) {
 
   const docLangs = new Set();
   const retrieve = async (q) => {
-    const texts = [];
+    const hits = [];
     for (const search of [searchDocuments, searchMemory]) {
       try {
         const r = await search(q);
         // searchDocuments reports the languages of the served chunks
         for (const l of r.languages || []) docLangs.add(l);
-        // matches carries the chunk texts (refs is metadata-only)
-        for (const m of r.matches || []) {
+        // matches carries the chunk texts, refs the per-hit metadata (doc)
+        (r.matches || []).forEach((m, i) => {
           const t = String(m || '').trim();
-          if (t) texts.push(t);
-        }
+          if (t) hits.push({ t, doc: r.refs?.[i]?.doc || null });
+        });
       } catch (err) {
         // retrieval failure degrades to fewer chunks, never to a fabricated one
         console.warn('⚠️ OSP retrieval failed:', err.message);
@@ -110,8 +121,12 @@ export async function retrieveFromBotMemory(query, topK = 4) {
     // extractor emits ~900-char chunks — the old 600 cap silently dropped a
     // third of every chunk). The cited hash stays this node's own view of the
     // chunk (GET_CHUNK serves the same text) — protocol-honest.
-    const capped = texts.map(t => (t.length > 1200 ? t.slice(0, 1200) : t));
-    return dropUncovered(q, rerankByCover(q, dedupe(capped)).slice(0, topK));
+    const capped = hits.map(e => ({ ...e, t: e.t.length > 1200 ? e.t.slice(0, 1200) : e.t }));
+    const seen = new Set();
+    const uniq = capped.filter(e => (!seen.has(e.t) && seen.add(e.t)));
+    const ranked = rerankByCover(q, uniq.map(e => e.t)).slice(0, topK);
+    const docOf = new Map(uniq.map(e => [e.t, e.doc]));
+    return dropUncovered(q, focusDocument(ranked, docOf));
   };
 
   let chunks = await retrieve(query);
