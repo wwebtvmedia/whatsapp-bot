@@ -77,15 +77,18 @@ async function translateText(text, targetLang) {
   return out;
 }
 
-/** Doc-level focus: chunks from a document other than the best hit's are
+/** Doc-level focus: chunks from a document other than the anchor's are
  * conflicting identity evidence — with two new magazines indexed, "titre du
- * magazine" made the model pick the wrong title or abstain. Keep the best
- * chunk's document mates, the best chunk itself, and any other document
- * manifest (a competing doc may legitimately be the answer). */
+ * magazine" made the model pick the wrong title or abstain. The anchor is the
+ * first manifest among the ranked hits (its presence marks a document-level
+ * query; foreign-document chunks outranking it at the rerank is exactly the
+ * drift this guards against), else the best hit. Same-document chunks stay,
+ * any other manifest stays (a competing doc may legitimately be the answer). */
 export function focusDocument(ranked, docOf) {
-  const bestDoc = docOf.get(ranked[0]);
+  const anchor = ranked.find(t => t.startsWith('[Document ')) || ranked[0];
+  const bestDoc = docOf.get(anchor);
   if (!bestDoc) return ranked;
-  return ranked.filter((t, i) => i === 0 || docOf.get(t) === bestDoc || t.startsWith('[Document '));
+  return ranked.filter(t => docOf.get(t) === bestDoc || t.startsWith('[Document '));
 }
 
 /** Pull this bot's own memory for a query: documents first, then chats.
