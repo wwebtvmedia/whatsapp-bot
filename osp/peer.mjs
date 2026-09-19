@@ -14,25 +14,37 @@
 
 import {
   Packet, Action, Mode, Node, DevSigner, D3Provider, RagStore, HttpHub,
-  buildEnvelope, chunkHash, embed, queryCover,
+  buildEnvelope, chunkHash, embed, queryCover, tokenize,
 } from './core.mjs';
 
 // ---------------------------------------------------------------------------
 // Responder rungs — bot-local retrieval (chroma) + bot-local LLM (llama.cpp)
 // ---------------------------------------------------------------------------
 
+// core's STOPWORDS is English-only (byte-parity with the reference impls), so
+// French function words ride into queryCover: "du", "est", "que"… gave ad
+// chunks 0.5-0.75 cover against a French question. Serving coverage is
+// therefore measured per meaningful token only — this node-local list, core
+// stays untouched for interop.
+const LOCAL_STOPWORDS = new Set(('le la les des un une du de au aux et est sont que qui quoi quel dans ' +
+  'pour avec sur par ce cet cette il elle nous vous je tu on en son sa ses leur their the a an of to ' +
+  'in on at is are was were what which who this that it its').split(' '));
+
 /** Chunks far below the best query coverage are filler: ads sharing a couple
- * of common French words with the query made the grounded model abstain even
- * with the answer literally in the first chunk. Chunks at ≥75% of the best
- * coverage stay (a set of equally-covering hits passes whole); sets with no
- * covering chunk at all (pure-semantic hits) pass through untouched. */
+ * of common words with the query made the grounded model abstain even with
+ * the answer literally in the first chunk. Coverage is measured per
+ * meaningful query token; chunks at ≥75% of the best stay (equally-covering
+ * sets pass whole, pure-semantic sets pass untouched), and the rerank's own
+ * #1 is never dropped. */
 export function dropUncovered(query, texts) {
   if (texts.length <= 1) return texts;
-  const qv = embed(query);
-  const covers = texts.map(t => queryCover(qv, embed(t)));
+  const tokens = tokenize(query).filter(t => !LOCAL_STOPWORDS.has(t) && t.length > 2);
+  if (!tokens.length) return texts;
+  const vecs = texts.map(t => embed(t));
+  const covers = vecs.map(v => tokens.filter(t => queryCover(embed(t), v) > 0).length / tokens.length);
   const best = Math.max(...covers);
   if (best <= 0) return texts;
-  return texts.filter((_, i) => covers[i] >= 0.75 * best);
+  return texts.filter((t, i) => i === 0 || covers[i] >= 0.75 * best);
 }
 
 // Set by the /packet handler when retrieval translated the query: the sealed
@@ -165,14 +177,12 @@ export class BotLlmProvider extends D3Provider {
     this.model = process.env.LLM_MODEL || '';
   }
 
-  async generate(query, chunks) {
-    const envelope = buildEnvelope(envelopeQueryOverride || query, chunks);
-    envelopeQueryOverride = null;
-    // think:false + options.num_predict: the ollama API ignores `max_tokens`,
-    // and reasoning models (gemma4) then spend the whole budget thinking —
-    // `content` came back EMPTY with done_reason:"length". Disabling the
-    // thinking channel returns a grounded answer in seconds. Low temperature:
-    // grounded extraction rambles about "corrupted data" at 0.7.
+  // One sealed ollama call. think:false + options.num_predict: the ollama API
+  // ignores `max_tokens`, and reasoning models (gemma4) then spend the whole
+  // budget thinking — `content` came back EMPTY with done_reason:"length".
+  // Disabling the thinking channel returns a grounded answer in seconds. Low
+  // temperature: grounded extraction rambles about "corrupted data" at 0.7.
+  async chat(envelope, { timeoutMs = 150_000 } = {}) {
     const payload = {
       ...(this.model ? { model: this.model } : {}),
       messages: [{ role: 'user', content: envelope }],
@@ -187,11 +197,28 @@ export class BotLlmProvider extends D3Provider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(280_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`LLM error (${res.status})`);
     const data = await res.json();
     const answer = data.choices?.[0]?.message?.content ?? data.message?.content;
+    if (!answer) throw new Error('LLM returned no content');
+    return answer;
+  }
+
+  async generate(query, chunks) {
+    const envelope = buildEnvelope(envelopeQueryOverride || query, chunks);
+    envelopeQueryOverride = null;
+    let answer = await this.chat(envelope);
+    // sampling variance: gemma abstains on some draws even with the answer
+    // literally in the first chunk — one identical retry recovers most of
+    // those (150s + 120s stays inside the origin's 300s patience)
+    if (isInsufficientEvidence(answer)) {
+      answer = await this.chat(envelope, { timeoutMs: 120_000 }).catch(err => {
+        console.warn('⚠️ OSP retry generation failed:', err.message);
+        return null;
+      });
+    }
     if (!answer) throw new Error('LLM returned no content');
     if (isInsufficientEvidence(answer)) throw new Error('no answer in evidence');
     return { answer, provider: this.name, cost: { generations: 1 } };
