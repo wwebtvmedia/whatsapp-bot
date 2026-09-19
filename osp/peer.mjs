@@ -225,6 +225,22 @@ export class BotLlmProvider extends D3Provider {
   }
 }
 
+/** Full responder retrieval + grounded generation — exactly what an inbound
+ * RESOLVE runs (minus the packet sealing and the RagStore bookkeeping). Used
+ * by replay tooling so a test cannot drift from production: the envelope
+ * carries the translated query just like the /packet handler arms it. */
+export async function answerQuery(query, topK = 4) {
+  const { texts, query: effectiveQuery } = await retrieveFromBotMemory(query, topK);
+  envelopeQueryOverride = effectiveQuery !== query ? effectiveQuery : null;
+  try {
+    const chunks = texts.map(t => ({ hash: chunkHash(t), text: t }));
+    const out = await new BotLlmProvider().generate(query, chunks);
+    return { ...out, effectiveQuery, texts };
+  } finally {
+    envelopeQueryOverride = null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Peer singleton — node wiring + express router
 // ---------------------------------------------------------------------------
