@@ -463,11 +463,15 @@ test('splitPdfByToc: cuts a generated magazine PDF into its articles', { skip: !
   try {
     const articles = await splitPdfByToc(file);
     assert.ok(articles, 'expected a TOC split');
-    assert.deepStrictEqual(articles.map(a => a.title), ['Article Alpha', 'Article Beta', 'Article Gamma', 'Credits page']);
-    assert.deepStrictEqual(articles.map(a => a.startPage), [3, 4, 5, 6]);
-    assert.ok(articles[0].text.includes('[page 3]') && articles[0].text.includes('ALPHA BODY'));
-    assert.ok(!articles[0].text.includes('BETA BODY') && !articles[0].text.includes('filler'));
-    assert.ok(articles[3].text.includes('CREDITS BODY')); // last article runs to the end
+    // front matter (cover + TOC pages) becomes its own article, else questions
+    // about the magazine's title have no evidence to ground on
+    assert.deepStrictEqual(articles.map(a => a.title),
+      ['Avant-propos (couverture, sommaire)', 'Article Alpha', 'Article Beta', 'Article Gamma', 'Credits page']);
+    assert.deepStrictEqual(articles.map(a => a.startPage), [1, 3, 4, 5, 6]);
+    assert.ok(articles[0].text.includes('[page 1]') && articles[0].text.includes('LE SOMMAIRE'));
+    assert.ok(articles[1].text.includes('[page 3]') && articles[1].text.includes('ALPHA BODY'));
+    assert.ok(!articles[1].text.includes('BETA BODY') && !articles[1].text.includes('filler'));
+    assert.ok(articles[4].text.includes('CREDITS BODY')); // last article runs to the end
     // a document without a detectable TOC returns null (fallback path)
     fs.writeFileSync(file, makePdf([['just a letter', 'no page numbers here']]));
     assert.strictEqual(await splitPdfByToc(file), null);

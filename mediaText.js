@@ -412,6 +412,19 @@ export async function splitPdfByToc(filePath, { headPages = 6 } = {}) {
     if (toc.length < TOC_MIN_ENTRIES) return null;
 
     const articles = [];
+    // pages before the first listed article (cover, masthead, the TOC itself)
+    // would silently vanish from the index — questions like "what is the
+    // magazine's title" are answered exactly from there
+    if (toc[0].page > 1) {
+      const frontText = pages.slice(0, toc[0].page - 1)
+        .map((pageText, j) => `[page ${j + 1}] ${pageText}`)
+        .join('\n')
+        .trim();
+      if (frontText) articles.push({
+        title: 'Avant-propos (couverture, sommaire)',
+        startPage: 1, endPage: toc[0].page - 1, text: frontText
+      });
+    }
     for (let i = 0; i < toc.length; i++) {
       const start = toc[i].page;
       const end = (i + 1 < toc.length ? toc[i + 1].page : numpages + 1) - 1;
