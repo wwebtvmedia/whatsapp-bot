@@ -422,7 +422,11 @@ export async function splitPdfByToc(filePath, { headPages = 6 } = {}) {
         .trim();
       if (frontText) articles.push({
         title: 'Avant-propos (couverture, sommaire)',
-        startPage: 1, endPage: toc[0].page - 1, text: frontText
+        startPage: 1, endPage: toc[0].page - 1,
+        // keyword header: the cover rarely repeats the words a query uses
+        // ("title of the magazine") — this is what makes it retrievable
+        text: '[couverture et sommaire du document — titre principal, '
+          + 'liste des articles du numéro]\n' + frontText
       });
     }
     for (let i = 0; i < toc.length; i++) {
