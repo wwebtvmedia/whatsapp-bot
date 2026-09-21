@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = "http://localhost:3000"
+BASE_URL = "http://192.168.1.249:3000"
 API_TOKEN = os.getenv("API_TOKEN")  # Read from .env
 
 HEADERS = {
