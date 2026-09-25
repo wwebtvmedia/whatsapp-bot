@@ -19,7 +19,7 @@ if (!token) { console.error('PEER_TOKEN required (the bot API_TOKEN)'); process.
 
 const query = process.argv[2] || 'titre du nouveau magazine';
 const origin = new Node(process.env.ORIGIN_ID || 'origin-validate', new RagStore(), null,
-  { signer: new DevSigner() });
+  { signer: new DevSigner(process.env.OSP_SIGNING_SECRET || 'osp-dev-secret') });
 const hub = new HttpHub(id => (id === peer ? { url, token } : null));
 hub.join(origin);
 

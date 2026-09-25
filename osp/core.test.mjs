@@ -284,3 +284,23 @@ test('budget rolls over at the day boundary (M2)', () => {
   assert.equal(b.spent, 0);
   assert.equal(b.charge(), true);
 });
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — the signing secret is deployment state (REQ-S-01):
+// OSP_SIGNING_SECRET feeds the constructor, so peers not sharing the secret
+// must not verify each other. The well-known default stays available for
+// interop vectors, but is dev-grade only.
+// ---------------------------------------------------------------------------
+
+test('signers with different secrets do not verify each other (M4)', () => {
+  const a = new DevSigner('secret-a');
+  const b = new DevSigner('secret-b');
+  const pkt = new Packet({
+    action: Action.PROPOSE, originId: 'o', queryId: newId(12), sender: 'o',
+    gas: 3, payload: { query_vec: [...embed(T2)], query_text: T2 },
+  }).seal(a);
+  assert.equal(pkt.verified(a), true);
+  assert.equal(pkt.verified(b), false, 'a different secret must fail verification');
+  assert.equal(new DevSigner('osp-dev-secret').sign({ x: 1 }),
+    new DevSigner().sign({ x: 1 }), 'the documented default secret is stable');
+});

@@ -270,7 +270,12 @@ let peer = null;
 
 export function getOspPeer() {
   if (peer) return peer;
-  const signer = new DevSigner();
+  // REQ-S-01: the HMAC dev signer is a stand-in — the shared secret must come
+  // from the environment; falling back to the well-known default is dev-grade
+  // and labelled as such (the signer label rides on every logged handshake)
+  const secret = process.env.OSP_SIGNING_SECRET;
+  if (!secret) console.warn('⚠️ OSP_SIGNING_SECRET unset — sealing with the well-known dev secret (dev-grade only, REQ-S-01)');
+  const signer = new DevSigner(secret || 'osp-dev-secret');
   const rag = new RagStore();
   const responder = new Node(process.env.OSP_NODE_ID || 'whatsapp-bot', rag,
     new BotLlmProvider(), { signer });
