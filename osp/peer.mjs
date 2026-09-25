@@ -366,7 +366,9 @@ export class PinStore {
 
 export function getOspPeer() {
   if (peer) return peer;
-  const pins = new PinStore().load();
+  // pins persist across restarts by default — trust reset by a reboot would
+  // silently re-pin whoever speaks next (tests pass file: null explicitly)
+  const pins = new PinStore({ file: process.env.OSP_PINS_FILE || 'data/osp-pins.json' }).load();
   const edSeed = process.env.OSP_ED25519_SEED || null;
   const secret = process.env.OSP_SIGNING_SECRET;
   // REQ-S-01 posture: Ed25519 when a seed is configured; the HMAC dev signer

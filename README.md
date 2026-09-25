@@ -68,6 +68,10 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 | `MEDIA_MAX_CHUNKS` | `200` | Cap on indexed chunks per document (~180 pages; the extracted text is always fully kept in the `.txt` sidecar). |
 | `MAIL_ENABLED` | `false` | Ingest inbound emails (needs `MAIL_HOST`, `MAIL_USER`, `MAIL_PASS`, `MAIL_FROM`, `MAIL_IMAP_HOST`). |
 | `DIGEST_EMBED_EVERY` / `CONTEXT_MAX_MESSAGES` | `5` / `6` | Memory tuning. |
+| `OSP_PEERS` | *(empty)* | JSON map `nodeId → url` or `{url, token}` of OSP peers the bot can query as origin (`/osp/query`). |
+| `OSP_SIGNING_SECRET` | *(dev secret)* | HMAC dev signer secret. **Dev-grade only (REQ-S-01)** — a warning is logged when this is the active scheme. |
+| `OSP_ED25519_SEED` | *(empty)* | 32-byte hex Ed25519 seed. When set, the bot seals packets as JWS compact EdDSA and advertises its key bundle on `/osp/endpoint.json` (generate one with `node scripts/osp-keygen.mjs`). Both schemes verify either way, so the migration is coordinated per-peer. |
+| `OSP_PINS_FILE` | `data/osp-pins.json` | TOFU pin store (REQ-S-02): the first key bundle seen for a peer is pinned; a different bundle is rejected until an explicit `POST /osp/pins/repin` (authenticated). Unknown signing keys get one bootstrap chance against the sender's `/osp/endpoint.json` — and only when that sender is a configured `OSP_PEERS` entry whose record proves its own `node_id`. `GET /osp/pins` lists the pins. |
 
 ### 🧠 LLM Setup (automatic)
 
