@@ -9,8 +9,17 @@ import assert from 'node:assert/strict';
 import {
   embed, similarity, chunkHash, canonicalJson, DevSigner, Packet, Action, Mode,
   Node, InMemoryHub, RagStore, EchoGroundedProvider, ConfabulatingProvider,
-  pyDouble, buildEnvelope, tokenize, queryCover, parseWire, PyFloat, pyf,
+  pyDouble, buildEnvelope, tokenize, queryCover, parseWire, PyFloat, pyf, newId,
 } from './core.mjs';
+
+/** EchoGroundedProvider that counts generation calls. */
+function CountingProvider() {
+  const p = new EchoGroundedProvider();
+  p.calls = 0;
+  const orig = p.generate.bind(p);
+  p.generate = (...a) => { p.calls += 1; return orig(...a); };
+  return p;
+}
 
 const T1 = 'hydraulic pump failure is caused by cavitation and worn seals';
 const T2 = 'why does hydraulic pump failure happen';
@@ -220,4 +229,38 @@ test('a Python-sealed PROPOSE is processed, not silently dropped (B1+B2 end to e
   assert.ok(reply, 'a verified packet must never be silently dropped');
   assert.equal(reply.action, Action.RFO);
   assert.equal(reply.payload.reason, 'expired');
+});
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — 5.3.4 "the single generation": ALIGN is a retrieval
+// lock-in report. It used to fire a budgeted D3 generation whose result was
+// discarded, doubling the cost per negotiation (and leaking the verbatim
+// query to a remote provider before the T2 gate, REQ-NF-02).
+// ---------------------------------------------------------------------------
+
+test('ALIGN neither generates nor charges the budget (M1/M3)', () => {
+  const d3 = CountingProvider();
+  const responder = new Node('bot', new RagStore([T1]), d3);
+  const align = new Packet({
+    action: Action.ALIGN, originId: 'origin', queryId: newId(12), sender: 'origin',
+    gas: 3, payload: { query_vec: [...embed(T2)], source: T2, target: chunkHash(T1) },
+  }).seal(new DevSigner());
+  const reply = responder.onPacket(align);
+  assert.equal(reply.action, Action.ACK);
+  assert.ok(Number(reply.payload.mapping_distance) <= 1);
+  assert.equal(d3.calls, 0, 'ALIGN must not generate');
+  assert.equal(responder.budget.spent, 0, 'ALIGN must not charge the budget');
+});
+
+test('one negotiation triggers exactly one generation (5.3.4)', async () => {
+  const d3 = CountingProvider();
+  const hub = new InMemoryHub();
+  const origin = new Node('origin', new RagStore(), null);
+  const responder = new Node('bot', new RagStore([T1]), d3);
+  origin.attach(hub);
+  responder.attach(hub);
+  const out = await origin.query(T2, 0);
+  assert.equal(out.mode, Mode.RESOLVED);
+  assert.equal(d3.calls, 1, 'one RESOLVE, one generation');
+  assert.equal(responder.budget.spent, 1);
 });

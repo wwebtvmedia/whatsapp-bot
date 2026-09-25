@@ -539,13 +539,11 @@ export class Node {
     const key = `${pkt.queryId}|${pkt.originId}|${source}|${target}`;
     let dist = this.mappingCache.get(key);
     if (dist === undefined) {
+      // 5.3.3 — the lock-in report is retrieval-only: generating here burned a
+      // second budgeted generation per negotiation (5.3.4 "the single
+      // generation") and leaked the verbatim query to a remote provider
+      // before the T2 gate (REQ-NF-02)
       dist = round3(1.0 - this.retrievalScore(qv)[0]);
-      if (this.d3 != null && this.budget.charge()) {
-        Promise.resolve(this.d3.generate(
-          `Confirm mapping ${source} -> ${target}`,
-          this.rag.entries.slice(0, 1).map(c => ({ hash: c.hash, text: c.text })),
-        )).catch(() => {});
-      }
       this.mappingCache.set(key, dist);
     }
     return new Packet({
