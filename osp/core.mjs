@@ -376,9 +376,17 @@ export class Budget {
   constructor(generationsPerDay = 50) {
     this.limit = generationsPerDay;
     this.spent = 0;
+    this.day = Budget.today();
   }
-  get left() { return Math.max(0, this.limit - this.spent); }
+  static today() { return new Date().toISOString().slice(0, 10); }
+  // REQ-F-04: a *daily* budget — spent rolls over at the UTC day boundary
+  rollover() {
+    const today = Budget.today();
+    if (today !== this.day) { this.day = today; this.spent = 0; }
+  }
+  get left() { this.rollover(); return Math.max(0, this.limit - this.spent); }
   charge(n = 1) {
+    this.rollover();
     if (this.left < n) return false;
     this.spent += n;
     return true;

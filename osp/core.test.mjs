@@ -10,6 +10,7 @@ import {
   embed, similarity, chunkHash, canonicalJson, DevSigner, Packet, Action, Mode,
   Node, InMemoryHub, RagStore, EchoGroundedProvider, ConfabulatingProvider,
   pyDouble, buildEnvelope, tokenize, queryCover, parseWire, PyFloat, pyf, newId,
+  Budget,
 } from './core.mjs';
 
 /** EchoGroundedProvider that counts generation calls. */
@@ -263,4 +264,23 @@ test('one negotiation triggers exactly one generation (5.3.4)', async () => {
   assert.equal(out.mode, Mode.RESOLVED);
   assert.equal(d3.calls, 1, 'one RESOLVE, one generation');
   assert.equal(responder.budget.spent, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — REQ-F-04 says "50 generations/day"; spent used to
+// accumulate for the life of the process, so a long-running bot eventually
+// abstained forever.
+// ---------------------------------------------------------------------------
+
+test('budget rolls over at the day boundary (M2)', () => {
+  const b = new Budget(3);
+  assert.equal(b.charge(), true);
+  assert.equal(b.charge(), true);
+  assert.equal(b.charge(), true);
+  assert.equal(b.charge(), false, 'exhausted for the day');
+  assert.equal(b.left, 0);
+  b.day = '2000-01-01';                     // simulate the clock passing midnight
+  assert.equal(b.left, 3, 'a new day resets spent');
+  assert.equal(b.spent, 0);
+  assert.equal(b.charge(), true);
 });
