@@ -269,6 +269,9 @@ export const Mode = {
 
 export const newId = n => randomUUID().replace(/-/g, '').slice(0, n);
 
+/** validate() verdict for forged/replayed packets — drop without a reply (5.2.2). */
+export const SILENT_DROP = Symbol('osp.silent-drop');
+
 export class Packet {
   constructor({ action, originId, queryId, sender, gas, trail = [], payload = {},
                 packetId = newId(12), jti = newId(16), ts = Date.now() / 1000,
@@ -487,15 +490,31 @@ export class Node {
     this.hub = null;
   }
 
-  onPacket(pkt) {
-    if (!pkt.verified(this.signer)) return null;
+  /**
+   * Layer 0 — every cheap reject, before any retrieval or generation (5.2.2,
+   * 5.2.3, 5.6.1, 5.6.2). Returns SILENT_DROP (forged/replayed — answer
+   * nothing, not even an error), an RFO Packet to send back, or null when the
+   * packet may proceed to a handler. Transports call this FIRST so a forged
+   * packet costs a signature check, not a chroma query or an LLM call.
+   */
+  validate(pkt) {
+    if (!pkt.verified(this.signer)) return SILENT_DROP;
+    if (pkt.version !== PACKET_VERSION)
+      return this.rfo(pkt, Mode.MISMATCH, `unsupported protocol version ${pkt.version}`);
     if (pkt.expired()) return this.rfo(pkt, Mode.GAS_EXHAUSTED, 'expired');
-    if (this.jtiCache.has(pkt.jti)) return null;
-    this.jtiCache.add(pkt.jti);
+    if (this.jtiCache.has(pkt.jti)) return SILENT_DROP;
     if (pkt.trail.some(h => h.node === this.id))
       return this.rfo(pkt, Mode.LOOP_DETECTED, `${this.id} seen in trail`);
     if (pkt.gas <= 0 && pkt.action !== Action.RFO)
       return this.rfo(pkt, Mode.GAS_EXHAUSTED, 'gas = 0 on arrival');
+    return null;
+  }
+
+  onPacket(pkt) {
+    const early = this.validate(pkt);
+    if (early === SILENT_DROP) return null;
+    if (early) return early;                   // the layer-0 RFO
+    this.jtiCache.add(pkt.jti);
     switch (pkt.action) {
       case Action.PROPOSE: return this.onPropose(pkt);
       case Action.ALIGN: return this.onAlign(pkt);

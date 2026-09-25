@@ -10,7 +10,7 @@ import {
   embed, similarity, chunkHash, canonicalJson, DevSigner, Packet, Action, Mode,
   Node, InMemoryHub, RagStore, EchoGroundedProvider, ConfabulatingProvider,
   pyDouble, buildEnvelope, tokenize, queryCover, parseWire, PyFloat, pyf, newId,
-  Budget,
+  Budget, SILENT_DROP,
 } from './core.mjs';
 
 /** EchoGroundedProvider that counts generation calls. */
@@ -303,4 +303,46 @@ test('signers with different secrets do not verify each other (M4)', () => {
   assert.equal(pkt.verified(b), false, 'a different secret must fail verification');
   assert.equal(new DevSigner('osp-dev-secret').sign({ x: 1 }),
     new DevSigner().sign({ x: 1 }), 'the documented default secret is stable');
+});
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — layer-0 rejects are cheap and complete: sig, version,
+// TTL, replay, loop and gas are decided BEFORE retrieval or generation runs
+// (a forged packet used to pay for a chroma query and an LLM call first),
+// and an unknown protocol version is refused explicitly (m2).
+// ---------------------------------------------------------------------------
+
+test('validate() rejects forged, expired and replayed packets before any work (M6)', () => {
+  const responder = new Node('bot', new RagStore([T1]), new EchoGroundedProvider());
+  const signer = new DevSigner();
+  const build = (over = {}) => new Packet({
+    action: Action.PROPOSE, originId: 'o', queryId: newId(12), sender: 'o',
+    gas: 3, payload: { query_vec: [...embed(T2)], query_text: T2 }, ...over,
+  });
+  assert.equal(responder.validate(build().seal(signer)), null, 'honest packet proceeds');
+  assert.equal(responder.validate(build().seal(new DevSigner('other-secret'))), SILENT_DROP,
+    'forged → silent, not an LLM call');
+
+  const old = build({ ts: 1000, expS: 60 }).seal(signer);
+  const rfo = responder.validate(old);
+  assert.equal(rfo.action, Action.RFO);
+  assert.equal(rfo.payload.reason, 'expired');
+
+  const fresh = build().seal(signer);
+  assert.equal(responder.validate(fresh), null);
+  assert.equal(responder.onPacket(fresh).action, Action.BID);   // competent corpus → bid
+  assert.equal(responder.validate(fresh), SILENT_DROP, 'same jti again → replay, silent');
+});
+
+test('a wrong protocol version gets an explicit MISMATCH RFO (m2)', () => {
+  const responder = new Node('bot', new RagStore([T1]), new EchoGroundedProvider());
+  const pkt = new Packet({
+    action: Action.PROPOSE, originId: 'o', queryId: newId(12), sender: 'o',
+    gas: 3, version: '0.5',
+    payload: { query_vec: [...embed(T2)], query_text: T2 },
+  }).seal(new DevSigner());
+  const rfo = responder.validate(pkt);
+  assert.equal(rfo.action, Action.RFO);
+  assert.equal(rfo.payload.mode, Mode.MISMATCH);
+  assert.ok(rfo.payload.reason.includes('0.5'));
 });

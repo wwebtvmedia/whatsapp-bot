@@ -14,7 +14,7 @@
 
 import {
   Packet, Action, Mode, Node, DevSigner, D3Provider, RagStore, HttpHub,
-  buildEnvelope, chunkHash, embed, queryCover, tokenize, canonicalJson,
+  buildEnvelope, chunkHash, embed, queryCover, tokenize, canonicalJson, SILENT_DROP,
 } from './core.mjs';
 
 // ---------------------------------------------------------------------------
@@ -333,6 +333,16 @@ export async function buildOspRouter(auth) {
         ? Packet.fromWireText(req.rawBody.toString('utf8'))
         : Packet.fromWire(req.body);
     } catch { return res.status(400).json({ error: 'bad packet' }); }
+    // layer 0 first (sig, version, TTL, replay, loop, gas): a forged packet
+    // must cost a signature check, not a chroma query and an LLM call
+    try {
+      const early = p.responder.validate(pkt);
+      if (early === SILENT_DROP) return res.status(204).end();
+      if (early) {
+        console.log(`↩️ OSP layer-0 reject to ${pkt.originId}: ${early.action} ${early.payload.reason}`);
+        return res.type('application/json').send(canonicalJson(early.toWire()));
+      }
+    } catch { return res.status(204).end(); }
     // per-request retrieval feed: chroma → RagStore before the sync pipeline
     if (pkt.action === Action.PROPOSE || pkt.action === Action.RESOLVE) {
       const qv = embed(String(pkt.payload?.query_text ?? ''));
