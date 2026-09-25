@@ -342,6 +342,9 @@ export class PinStore {
    * chance to pin itself from the sender's advertised discovery record, and
    * only when that sender is a configured peer (we know where to ask) and the
    * record's node_id matches the packet's sender (no impostor self-pinning).
+   * A thin N1 origin seals as `origin-<id>` — resolve it to the configured
+   * responder peer, and pin under the wire sender so verification's
+   * sender binding matches.
    */
   async bootstrap(pkt, remotes) {
     if (!isJwsLike(pkt.sig)) return false;
@@ -350,7 +353,8 @@ export class PinStore {
     catch { return false; }
     if (!kid || this.keyLookup(kid) || this.bootstrapTried.has(kid)) return false;
     this.bootstrapTried.add(kid);
-    const remote = remotes[pkt.sender];
+    const responderId = pkt.sender.replace(/^origin-/, '');
+    const remote = remotes[pkt.sender] ?? remotes[responderId];
     const url = typeof remote === 'string' ? remote : remote?.url;
     if (!url) return false;
     const headers = {};
@@ -368,7 +372,12 @@ export class PinStore {
         { headers, signal: AbortSignal.timeout(5000) });
       const record = await res.json();
       const bundle = record.key_bundle;
-      if (record.node_id !== pkt.sender) return false;      // impostor record
+      // the record must prove the sender identity: the wire sender itself, or
+      // the responder behind an `origin-` N1 — and the fetch went to the
+      // CONFIGURED peer, so the proof is the peer's own, not a claimed one
+      if (record.node_id !== pkt.sender && record.node_id !== responderId) {
+        return false;                                       // impostor record
+      }
       return this.pin(pkt.sender, bundle) === 'pinned';
     } catch { return false; }
   }

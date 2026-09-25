@@ -236,6 +236,41 @@ test('bootstrap forwards the peer link token to endpoint.json', async () => {
   assert.equal(bare.headers.authorization, undefined);
 });
 
+test('bootstrap resolves a thin origin-N1 sender to its responder peer', async () => {
+  const { PinStore } = await import('./peer.mjs');
+  const { Packet, Action, Ed25519Signer, HybridSigner, embed } = await import('./core.mjs');
+  const signer = new Ed25519Signer(
+    '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60');
+  // the tablet's N1 seals as origin-<nodeId>, its responder record says <nodeId>
+  const n1Pkt = new Packet({
+    action: Action.PROPOSE, originId: 'origin-tablet', queryId: 'q', sender: 'origin-tablet',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(signer);
+  const record = { node_id: 'tablet', key_bundle: signer.bundle() };
+
+  let asked;
+  const store = new PinStore({
+    fetchImpl: async (url) => (asked = url, { json: async () => record }),
+  });
+  assert.equal(await store.bootstrap(n1Pkt, { tablet: 'http://tablet:8080' }), true,
+    'origin-<id> must discover through the <id> peer entry');
+  assert.equal(asked, 'http://tablet:8080/osp/endpoint.json');
+  // pinned under the WIRE sender so verify's sender binding matches
+  assert.equal(store.keyLookup(signer.kid)?.nodeId, 'origin-tablet');
+  // and the pinned key verifies a packet from that N1 (full hybrid path)
+  const hybrid = new HybridSigner({ keyLookup: store.keyLookup });
+  assert.equal(hybrid.verify(n1Pkt.signedObject(), n1Pkt.sig), true);
+  assert.equal(hybrid.verify(n1Pkt.signedObject(), n1Pkt.sig.replace(/.$/, 'A')), false);
+
+  // the record must still prove the sender or its responder — an unrelated
+  // node_id in the record stays an impostor
+  const impostor = new PinStore({
+    fetchImpl: async () => ({ json: async () => ({ ...record, node_id: 'elsewhere' }) }),
+  });
+  assert.equal(await impostor.bootstrap(n1Pkt, { tablet: 'http://tablet:8080' }), false);
+  assert.equal(impostor.keyLookup(signer.kid), null);
+});
+
 test('HybridSigner + PinStore accept a pinned sender and drop an impostor', async () => {
   const { PinStore } = await import('./peer.mjs');
   const { Packet, Action, Ed25519Signer, HybridSigner, embed } = await import('./core.mjs');
