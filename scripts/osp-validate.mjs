@@ -15,7 +15,7 @@
 //     node scripts/osp-validate.mjs "titre du nouveau magazine"
 // Expected: mode=RESOLVED, groundedness ≥ 0.8, answer quoted from the corpus.
 // Exit code 0 only on RESOLVED, so it can gate a deploy.
-import { HybridSigner, DevSigner, RagStore, HttpHub } from '../osp/core.mjs';
+import { Node, HybridSigner, DevSigner, RagStore, HttpHub } from '../osp/core.mjs';
 import { PinStore } from '../osp/peer.mjs';
 
 const url = (process.env.PEER_URL || 'http://localhost:3000').replace(/\/$/, '');
