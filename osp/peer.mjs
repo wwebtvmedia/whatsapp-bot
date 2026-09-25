@@ -353,9 +353,19 @@ export class PinStore {
     const remote = remotes[pkt.sender];
     const url = typeof remote === 'string' ? remote : remote?.url;
     if (!url) return false;
+    const headers = {};
+    const token = typeof remote === 'string' ? null : remote.token;
+    if (token) {
+      // both spellings so either server-side check accepts the same secret —
+      // the tablet bridge's endpoint.json is link-token gated like its other
+      // routes, and TOFU discovery must survive that gate
+      headers['x-api-token'] = token;
+      headers['authorization'] = `Bearer ${token}`;
+    }
     try {
       const base = url.replace(/\/osp\/packet$/, '').replace(/\/$/, '');
-      const res = await this.fetch(`${base}/osp/endpoint.json`, { signal: AbortSignal.timeout(5000) });
+      const res = await this.fetch(`${base}/osp/endpoint.json`,
+        { headers, signal: AbortSignal.timeout(5000) });
       const record = await res.json();
       const bundle = record.key_bundle;
       if (record.node_id !== pkt.sender) return false;      // impostor record

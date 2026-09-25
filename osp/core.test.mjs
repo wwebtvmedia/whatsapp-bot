@@ -454,6 +454,20 @@ test('Ed25519Signer derives the RFC 8032 test-1 key pair and kid', () => {
   assert.equal(signer.label, 'ED25519-JWS');
 });
 
+// Clamp regression, vector agreed with mcp/tests/test_signing.py and
+// SigningTest.kt: seed whose sha512 h[0:32] has bit 255 set — the RFC mask
+// (a &= 2^254-8) kills it, a clear-bit-254-only clamp does not and derives a
+// wrong key for ~half the seeds.
+const HIGHBIT_SEED = 'ed387623652b67e21596002bb6e55c8bc0c7d64de819e96e84bebc8c18e5c56d';
+const HIGHBIT_PUB_HEX = '6b5936ca403992a785aa772235f99c0eca0f8d1312399245db28819475990195';
+const HIGHBIT_KID = 'k2cd07c474c46';
+
+test('scalar clamping masks bit 255, not only bit 254', () => {
+  const signer = new Ed25519Signer(HIGHBIT_SEED);
+  assert.equal(signer.rawPublicKey.toString('hex'), HIGHBIT_PUB_HEX);
+  assert.equal(signer.kid, HIGHBIT_KID);
+});
+
 test('Ed25519Signer seals the shared golden vector (JS/Python/Kotlin parity)', () => {
   const { pkt, signer } = edFixedPacket();
   pkt.seal(signer);

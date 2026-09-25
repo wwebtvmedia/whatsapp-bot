@@ -201,6 +201,41 @@ test('bootstrap pins from the sender endpoint.json only when identities match', 
   assert.equal(fetches, before, 'an already-pinned kid costs no discovery fetch');
 });
 
+test('bootstrap forwards the peer link token to endpoint.json', async () => {
+  const { PinStore } = await import('./peer.mjs');
+  const { Packet, Action, Ed25519Signer, embed } = await import('./core.mjs');
+  const signer = new Ed25519Signer(
+    '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60');
+  const jwsPkt = new Packet({
+    action: Action.PROPOSE, originId: 'tablet', queryId: 'q', sender: 'tablet',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(signer);
+  const record = { node_id: 'tablet', key_bundle: signer.bundle() };
+
+  // the tablet bridge gates endpoint.json behind its link token — discovery
+  // must present it under both accepted spellings
+  let seen;
+  const authed = new PinStore({
+    fetchImpl: async (url, init) => (seen = { url, headers: init?.headers },
+      { json: async () => record }),
+  });
+  assert.equal(await authed.bootstrap(jwsPkt,
+    { tablet: { url: 'http://tablet:8080', token: 'link-secret' } }), true);
+  assert.equal(seen.url, 'http://tablet:8080/osp/endpoint.json');
+  assert.equal(seen.headers['x-api-token'], 'link-secret');
+  assert.equal(seen.headers.authorization, 'Bearer link-secret');
+
+  // bare-string peers stay unauthenticated
+  let bare;
+  const anon = new PinStore({
+    fetchImpl: async (url, init) => (bare = { headers: init?.headers },
+      { json: async () => record }),
+  });
+  assert.equal(await anon.bootstrap(jwsPkt, { tablet: 'http://tablet:8080' }), true);
+  assert.equal(bare.headers['x-api-token'], undefined);
+  assert.equal(bare.headers.authorization, undefined);
+});
+
 test('HybridSigner + PinStore accept a pinned sender and drop an impostor', async () => {
   const { PinStore } = await import('./peer.mjs');
   const { Packet, Action, Ed25519Signer, HybridSigner, embed } = await import('./core.mjs');
