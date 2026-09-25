@@ -10,7 +10,7 @@ import {
   embed, similarity, chunkHash, canonicalJson, DevSigner, Packet, Action, Mode,
   Node, InMemoryHub, RagStore, EchoGroundedProvider, ConfabulatingProvider,
   pyDouble, buildEnvelope, tokenize, queryCover, parseWire, PyFloat, pyf, newId,
-  Budget, SILENT_DROP,
+  Budget, SILENT_DROP, Ed25519Signer, HybridSigner,
 } from './core.mjs';
 
 /** EchoGroundedProvider that counts generation calls. */
@@ -416,4 +416,129 @@ test('the translated query reaches generate() through the packet, no global (m9)
   assert.equal(reply.action, Action.RESOLVE);
   assert.equal(seenCtx.ctx.envelopeQuery, 'pompe hydraulique (traduit)');
   assert.equal(seenCtx.q, T2, 'the raw query stays the fallback grounding');
+});
+
+// ---------------------------------------------------------------------------
+// REQ-S-01/02 — Ed25519 (JWS compact EdDSA) + HybridSigner + TOFU pinning.
+// The golden vector below is shared verbatim with the Python reference
+// (mcp/osp_core.py) and the Kotlin library (android/osp-lite): same seed, same
+// canonical bytes, same signature — three implementations, one wire.
+// ---------------------------------------------------------------------------
+
+const ED_SEED = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60';
+const ED_PUB_HEX = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+const ED_PUB_B64U = '11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo';
+const ED_KID = 'k21fe31dfa154';
+// PROPOSE pktedfixed12 / jtiedfixed1616ab / qfixed12ed255, ts 1758372366.25,
+// query 'pompe hydraulique en panne', sealed by the RFC 8032 test-1 key.
+const ED_SIG =
+  'eyJhbGciOiJFZERTQSIsImtpZCI6ImsyMWZlMzFkZmExNTQiLCJ0eXAiOiJPU1AvdjAuNiJ9' +
+  '.eyJhY3Rpb24iOiJQUk9QT1NFIiwiZXhwX3MiOjYwLCJnYXMiOjMsImp0aSI6Imp0aWVkZml4ZWQxNjE2YWIiLCJvcmlnaW5faWQiOiJvcmlnaW4iLCJwYWNrZXRfaWQiOiJwa3RlZGZpeGVkMTIiLCJwYXlsb2FkIjp7InF1ZXJ5X3RleHQiOiJwb21wZSBoeWRyYXVsaXF1ZSBlbiBwYW5uZSIsInF1ZXJ5X3ZlYyI6WzAsMCwwLDAsMCwwLDAsOSwwLDAsMCwwLDAsMCwwLDAsMSwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMzJdfSwicXVlcnlfaWQiOiJxZml4ZWQxMmVkMjU1Iiwic2VuZGVyIjoib3JpZ2luIiwidHJhaWwiOltdLCJ0cyI6MTc1ODM3MjM2Ni4yNSwidiI6IjAuNiJ9' +
+  '.ZFVEo0aF3unlGvQ5rAabXHYCNmWHq0BDOHZ1O-JxEKzpKzQuTy7flQSVLG6dbuXEoasXtwV51aVojqDte9LYCg';
+
+function edFixedPacket() {
+  const pkt = new Packet({
+    action: Action.PROPOSE, originId: 'origin', queryId: 'qfixed12ed255', sender: 'origin',
+    packetId: 'pktedfixed12', jti: 'jtiedfixed1616ab', ts: 1758372366.25, gas: 3,
+    payload: { query_vec: [...embed('pompe hydraulique en panne')],
+               query_text: 'pompe hydraulique en panne' },
+  });
+  return { pkt, signer: new Ed25519Signer(ED_SEED) };
+}
+
+test('Ed25519Signer derives the RFC 8032 test-1 key pair and kid', () => {
+  const { signer } = edFixedPacket();
+  assert.equal(signer.rawPublicKey.toString('hex'), ED_PUB_HEX);
+  assert.equal(signer.rawPublicKey.toString('base64url'), ED_PUB_B64U);
+  assert.equal(signer.kid, ED_KID);
+  assert.equal(signer.label, 'ED25519-JWS');
+});
+
+test('Ed25519Signer seals the shared golden vector (JS/Python/Kotlin parity)', () => {
+  const { pkt, signer } = edFixedPacket();
+  pkt.seal(signer);
+  assert.equal(pkt.sig, ED_SIG);
+  // and the embedded payload is byte-identical to our canonical form
+  const [h, p, s] = ED_SIG.split('.');
+  assert.equal(Buffer.from(p, 'base64url').toString('utf8'),
+    canonicalJson(pkt.signedObject()));
+  const header = JSON.parse(Buffer.from(h, 'base64url').toString('utf8'));
+  assert.deepEqual(header, { alg: 'EdDSA', kid: ED_KID, typ: 'OSP/v0.6' });
+});
+
+test('Ed25519 verification: self, hybrid+pin, and tamper rejections', () => {
+  const { pkt, signer } = edFixedPacket();
+  pkt.seal(signer);
+  assert.ok(pkt.verified(signer), 'self-verify with the raw signer');
+  const lookup = kid => (kid === ED_KID ? { signing: ED_PUB_B64U, nodeId: 'origin' } : null);
+  assert.ok(new HybridSigner({ keyLookup: lookup }).verify(pkt.signedObject(), pkt.sig),
+    'hybrid verifies a pinned EdDSA packet');
+  // unknown kid → no key, no trust
+  assert.equal(new HybridSigner({ keyLookup: () => null }).verify(pkt.signedObject(), pkt.sig), false);
+  assert.equal(new HybridSigner({}).verify(pkt.signedObject(), pkt.sig), false,
+    'no keyLookup configured → fail closed');
+  // sender binding: the pinned node must be the packet's sender
+  const wrongOwner = kid => (kid === ED_KID ? { signing: ED_PUB_B64U, nodeId: 'tablet' } : null);
+  assert.equal(new HybridSigner({ keyLookup: wrongOwner }).verify(pkt.signedObject(), pkt.sig), false,
+    'a pinned key used by another node_id is rejected');
+  // tampered payload / signature / corrupted JWS shape
+  const tamperedPkt = edFixedPacket().pkt;
+  tamperedPkt.seal(signer);
+  tamperedPkt.gas = 2;                       // flips a canonical byte
+  assert.equal(signer.verify(tamperedPkt.signedObject(), tamperedPkt.sig), false);
+  assert.equal(signer.verify(pkt.signedObject(), pkt.sig.slice(0, -4) + 'AAAA'), false,
+    'flipped signature bytes rejected');
+  assert.equal(signer.verify(pkt.signedObject(), 'not-a-jws'), false);
+  // an HMAC sig is NOT misread as EdDSA by the Ed25519 verifier
+  const hmacPkt = edFixedPacket().pkt;
+  hmacPkt.seal(new DevSigner());
+  assert.equal(signer.verify(hmacPkt.signedObject(), hmacPkt.sig), false);
+});
+
+test('HybridSigner seals per config and still verifies both schemes', () => {
+  const pkt = edFixedPacket().pkt;
+  const hybrid = new HybridSigner({ hmacSecret: 'osp-dev-secret', edSeed: ED_SEED });
+  assert.equal(hybrid.label, 'ED25519-JWS');
+  pkt.seal(hybrid);
+  assert.ok(pkt.sig.startsWith('eyJ'), 'EdDSA mode seals JWS');
+  const hmacOnly = new HybridSigner({ hmacSecret: 'osp-dev-secret' });
+  assert.equal(hmacOnly.label, 'DEV-SIGNER');
+  assert.equal(hmacOnly.verify(pkt.signedObject(), pkt.sig), false,
+    'HMAC-only verifier cannot fake EdDSA trust');
+  const hmacPkt = edFixedPacket().pkt;
+  hmacPkt.seal(hmacOnly);
+  assert.ok(!hmacPkt.sig.startsWith('eyJ'), 'HMAC mode seals the dev format');
+  const lookup = kid => (kid === ED_KID ? { signing: ED_PUB_B64U, nodeId: 'origin' } : null);
+  assert.equal(hybrid.verify(hmacPkt.signedObject(), hmacPkt.sig), true,
+    'EdDSA node still verifies legacy HMAC packets (migration window)');
+});
+
+test('Ed25519 packet flows through layer-0 validate like any other', async () => {
+  const { pkt, signer } = edFixedPacket();
+  pkt.seal(signer);
+  const hybrid = new HybridSigner({
+    keyLookup: kid => (kid === ED_KID ? { signing: ED_PUB_B64U, nodeId: 'origin' } : null),
+  });
+  // a verified EdDSA packet reaches the same layer-0 gates: TTL not yet
+  // expired (ts fixed in the past → RFO), replay etc. are covered elsewhere —
+  // here the EdDSA signature itself must not be mistaken for a bad packet
+  assert.ok(pkt.verified(hybrid));
+  // tampering with any signed field breaks verification (fail closed)…
+  const tampered = edFixedPacket().pkt;
+  tampered.seal(signer);
+  tampered.version = '9.9';
+  assert.equal(tampered.verified(hybrid), false, 'a mutated version invalidates the sig');
+  // …while a sender that HONESTLY signs an unsupported version still gets the
+  // RFO MISMATCH (it verifies; the version gate then answers)
+  const future = new Packet({
+    action: Action.PROPOSE, originId: 'origin', queryId: 'q', sender: 'origin',
+    packetId: 'pktfuture12', jti: 'jtifuture1616ab', ts: 1758372366.25, gas: 3,
+    version: '9.9',
+    payload: { query_vec: [...embed(T2)], query_text: T2 },
+  }).seal(signer);
+  assert.equal(future.verified(hybrid), true);
+  const responder = new Node('bot', new RagStore([T1]), null, { signer: hybrid });
+  const early = responder.validate(future);
+  assert.equal(early.action, Action.RFO);
+  assert.equal(early.payload.reason, 'unsupported protocol version 9.9');
 });

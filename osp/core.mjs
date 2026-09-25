@@ -10,7 +10,10 @@
 // diversity, generation-once, stakes tiers T0/T1/T2, 3-layer hallucination
 // firewall (DEV-SIGNER is dev-only; production swaps in Ed25519, REQ-S-01).
 
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash, createHmac, createPrivateKey, createPublicKey, randomUUID,
+  sign as cryptoSign, timingSafeEqual, verify as cryptoVerify,
+} from 'node:crypto';
 
 export const PACKET_VERSION = '0.6';
 
@@ -183,6 +186,98 @@ export class DevSigner {
     const b = Buffer.from(sig, 'utf8');
     return a.length === b.length && timingSafeEqual(a, b);
   }
+}
+
+// PKCS8 DER wrapper turning a raw 32-byte RFC 8032 seed into a private key
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+const ED25519_JWS_HEADER = kid =>
+  Buffer.from(`{"alg":"EdDSA","kid":"${kid}","typ":"OSP/v0.6"}`, 'utf8').toString('base64url');
+const b64url = b => Buffer.from(b).toString('base64url');
+const isJws = sig => typeof sig === 'string' && sig.split('.').length === 3 && sig.startsWith('eyJ');
+export { isJws };
+
+/**
+ * Production signer (REQ-S-01): Ed25519 (RFC 8032) via JWS compact
+ * serialization, as v0.4 specifies. sig = b64url(header)."."b64url(canonical
+ * bytes)."."b64url(64-byte signature) with header {"alg":"EdDSA","kid",…} —
+ * the canonical payload rides inside the JWS, so a verifier byte-compares it
+ * before trusting a signature and non-canonical senders fail closed. The key
+ * comes from a 32-byte seed (OSP_ED25519_SEED); kid is derived from the
+ * public key so peers can pin and select it (REQ-S-02).
+ */
+export class Ed25519Signer {
+  constructor(seed) {
+    const seedBuf = typeof seed === 'string' ? Buffer.from(seed, 'hex') : Buffer.from(seed);
+    if (seedBuf.length !== 32) throw new Error('Ed25519 seed must be 32 bytes');
+    this.privateKey = createPrivateKey({
+      key: Buffer.concat([ED25519_PKCS8_PREFIX, seedBuf]), format: 'der', type: 'pkcs8',
+    });
+    this.publicKey = createPublicKey(this.privateKey);
+    this.rawPublicKey = Buffer.from(
+      this.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32));
+    this.kid = 'k' + createHash('sha256').update(this.rawPublicKey).digest('hex').slice(0, 12);
+    this.headerB64 = ED25519_JWS_HEADER(this.kid);
+    this.label = 'ED25519-JWS';
+  }
+  sign(obj) {
+    const payload = b64url(Buffer.from(canonicalJson(obj), 'utf8'));
+    const signingInput = Buffer.from(`${this.headerB64}.${payload}`, 'utf8');
+    return `${this.headerB64}.${payload}.${b64url(cryptoSign(null, signingInput, this.privateKey))}`;
+  }
+  verify(obj, sig) { return Ed25519Signer.verifyWith(obj, sig, this.rawPublicKey); }
+  /** Verify a JWS against a raw 32-byte Ed25519 public key. */
+  static verifyWith(obj, sig, rawPublicKey) {
+    if (!isJws(sig)) return false;
+    const [headerB64, payloadB64, sigB64] = sig.split('.');
+    try {
+      const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8'));
+      if (header.alg !== 'EdDSA') return false;
+      if (!Buffer.from(payloadB64, 'base64url')
+        .equals(Buffer.from(canonicalJson(obj), 'utf8'))) return false;   // non-canonical
+      const signingInput = Buffer.from(`${headerB64}.${payloadB64}`, 'utf8');
+      const publicKey = createPublicKey({
+        key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), rawPublicKey]),
+        format: 'der', type: 'spki',
+      });
+      return cryptoVerify(null, signingInput, publicKey, Buffer.from(sigB64, 'base64url'));
+    } catch {
+      return false;
+    }
+  }
+  /** The discovery key bundle (REQ-S-02): alg + kid + raw public key. */
+  bundle() {
+    return { alg: 'EdDSA', kid: this.kid, signing: b64url(this.rawPublicKey) };
+  }
+}
+
+/**
+ * Transition signer: seals with the configured posture (Ed25519 when a seed
+ * is provided, otherwise the labelled dev HMAC) and verifies BOTH, so peers
+ * migrate one at a time. Ed25519 verification resolves the key through
+ * keyLookup(kid) → {signing, nodeId} — the pin store (REQ-S-02); a signature
+ * from a kid pinned to another node is rejected even if it verifies.
+ */
+export class HybridSigner {
+  constructor({ hmacSecret = 'osp-dev-secret', edSeed = null, keyLookup = null } = {}) {
+    this.hmac = new DevSigner(hmacSecret);
+    this.ed = edSeed ? new Ed25519Signer(edSeed) : null;
+    this.keyLookup = keyLookup;
+    this.label = this.ed ? 'ED25519-JWS' : 'DEV-SIGNER';
+  }
+  sign(obj) { return this.ed ? this.ed.sign(obj) : this.hmac.sign(obj); }
+  verify(obj, sig) {
+    if (!isJws(sig)) return this.hmac.verify(obj, sig);
+    if (!this.keyLookup) return false;
+    let header;
+    try { header = JSON.parse(Buffer.from(sig.split('.')[0], 'base64url').toString('utf8')); }
+    catch { return false; }
+    if (header.alg !== 'EdDSA') return false;
+    const pinned = this.keyLookup(header.kid);
+    if (!pinned?.signing) return false;
+    if (!Ed25519Signer.verifyWith(obj, sig, Buffer.from(pinned.signing, 'base64url'))) return false;
+    return pinned.nodeId === undefined || obj.sender === pinned.nodeId;
+  }
+  bundle() { return this.ed ? this.ed.bundle() : { alg: 'HMAC-SHA256', kid: 'dev', signing: '' }; }
 }
 
 // ---------------------------------------------------------------------------
@@ -750,7 +845,8 @@ export class Node {
 }
 
 export default {
-  PACKET_VERSION, Action, Mode, Packet, DevSigner, tokenize, embed, similarity,
+  PACKET_VERSION, Action, Mode, Packet, DevSigner, Ed25519Signer, HybridSigner,
+  tokenize, embed, similarity,
   chunkHash, canonicalJson, Budget, RagStore, Node, InMemoryHub, HttpHub,
   EchoGroundedProvider, ConfabulatingProvider, LexicalVerifier,
   buildEnvelope, sanitizeChunk, DEFAULT_CONFIG,

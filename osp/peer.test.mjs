@@ -113,3 +113,112 @@ test('BotLlmProvider reports the retry in cost.generations (m4)', async () => {
   const one = await p.generate('why?', [{ hash: 'h', text: 'evidence' }]);
   assert.equal(one.cost.generations, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — REQ-S-02 TOFU pin store: first sight pins, a changed
+// bundle is rejected until an explicit re-pin, discovery is restricted to
+// configured peers whose endpoint record proves its own identity.
+// ---------------------------------------------------------------------------
+
+const BUNDLE_A = { alg: 'EdDSA', kid: 'kaAAAAAAAAAA', signing: 'AAAA_publicKeyA' };
+const BUNDLE_A2 = { alg: 'EdDSA', kid: 'kaAAAAAAAAAA', signing: 'AAAA_publicKeyA' };
+const BUNDLE_B = { alg: 'EdDSA', kid: 'kbBBBBBBBBBB', signing: 'BBBB_publicKeyB' };
+
+test('PinStore pins first sight, rejects drift, repins explicitly', async () => {
+  const { PinStore } = await import('./peer.mjs');
+  const s = new PinStore();
+  assert.equal(s.pin('tablet', { alg: 'HMAC-SHA256' }), 'rejected', 'dev bundles are not pinnable');
+  assert.equal(s.pin('tablet', { alg: 'EdDSA', kid: 'x', signing: undefined }), 'rejected');
+  assert.equal(s.pin('tablet', BUNDLE_A), 'pinned');
+  assert.equal(s.pin('tablet', BUNDLE_A2), 'unchanged', 'same bundle replays as unchanged');
+  assert.equal(s.pin('tablet', BUNDLE_B), 'rejected', 'a NEW key for a pinned node is an attack');
+  assert.equal(s.keyLookup('kbBBBBBBBBBB'), null, 'the rejected key never resolves');
+  assert.equal(s.pin('tablet', BUNDLE_B, { repin: true }), 'pinned', 're-pin is explicit');
+  assert.equal(s.keyLookup('kbBBBBBBBBBB')?.nodeId, 'tablet');
+  assert.equal(s.keyLookup('unknown'), null);
+});
+
+test('PinStore persists pins across a load() round-trip', async () => {
+  const { PinStore } = await import('./peer.mjs');
+  const { tmpdir } = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const file = path.join(tmpdir(), `osp-pins-test-${process.pid}.json`);
+  try {
+    const writer = new PinStore({ file });
+    assert.equal(writer.pin('tablet', BUNDLE_A), 'pinned');
+    const reader = new PinStore({ file }).load();
+    assert.deepEqual(reader.keyLookup('kaAAAAAAAAAA'),
+      { signing: 'AAAA_publicKeyA', nodeId: 'tablet' });
+  } finally { fs.rmSync(file, { force: true }); }
+});
+
+test('bootstrap pins from the sender endpoint.json only when identities match', async () => {
+  const { PinStore } = await import('./peer.mjs');
+  const { Packet, Action, Ed25519Signer, embed } = await import('./core.mjs');
+  const signer = new Ed25519Signer(
+    '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60');
+  const jwsPkt = new Packet({
+    action: Action.PROPOSE, originId: 'tablet', queryId: 'q', sender: 'tablet',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(signer);
+  const record = { node_id: 'tablet', key_bundle: signer.bundle() };
+
+  // happy path: matching record, one remote configured → pinned
+  const ok = new PinStore({ fetchImpl: async () => ({ json: async () => record }) });
+  assert.equal(await ok.bootstrap(jwsPkt, { tablet: 'http://tablet:8080' }), true);
+  assert.equal(ok.keyLookup(signer.kid)?.nodeId, 'tablet');
+
+  // impostor: the record claims another node_id — no pin
+  const impostor = new PinStore({ fetchImpl: async () => ({ json: async () => ({ ...record, node_id: 'bot' }) }) });
+  assert.equal(await impostor.bootstrap(jwsPkt, { tablet: 'http://tablet:8080' }), false);
+  assert.equal(impostor.keyLookup(signer.kid), null);
+
+  // unknown sender: not a configured peer → nothing to ask, no pin
+  const stranger = new PinStore({ fetchImpl: async () => { throw new Error('must not fetch'); } });
+  assert.equal(await stranger.bootstrap(jwsPkt, {}), false);
+  assert.equal(stranger.keyLookup(signer.kid), null);
+
+  // HMAC packets never trigger discovery; a kid already tried is not retried
+  const hmacPkt = new Packet({
+    action: Action.PROPOSE, originId: 'tablet', queryId: 'q', sender: 'tablet',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(new (await import('./core.mjs')).DevSigner());
+  const once = new PinStore({ fetchImpl: async () => ({ json: async () => record }) });
+  assert.equal(await once.bootstrap(hmacPkt, { tablet: 'http://tablet:8080' }), false);
+  assert.equal(await once.bootstrap(jwsPkt, { tablet: 'http://tablet:8080' }), true);
+  // record now serves a DIFFERENT bundle: the kid is already tried → no refetch
+  let fetches = 0;
+  const drift = new PinStore({ fetchImpl: async () => (fetches += 1, { json: async () => record }) });
+  assert.equal(await drift.bootstrap(jwsPkt, { tablet: 'http://tablet:8080' }), true);
+  const other = new Packet({
+    action: Action.PROPOSE, originId: 'tablet', queryId: 'q2', sender: 'tablet',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(signer);
+  // same kid already pinned → keyLookup short-circuits before any fetch
+  const before = fetches;
+  assert.equal(await drift.bootstrap(other, { tablet: 'http://tablet:8080' }), false);
+  assert.equal(fetches, before, 'an already-pinned kid costs no discovery fetch');
+});
+
+test('HybridSigner + PinStore accept a pinned sender and drop an impostor', async () => {
+  const { PinStore } = await import('./peer.mjs');
+  const { Packet, Action, Ed25519Signer, HybridSigner, embed } = await import('./core.mjs');
+  const seed = '4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb';
+  const signer = new Ed25519Signer(seed);
+  const pins = new PinStore();
+  pins.pin('tablet', signer.bundle());
+  const hybrid = new HybridSigner({ keyLookup: pins.keyLookup });
+  const good = new Packet({
+    action: Action.PROPOSE, originId: 'tablet', queryId: 'q', sender: 'tablet',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(signer);
+  assert.equal(hybrid.verify(good.signedObject(), good.sig), true);
+  // same key, different claimed sender → the pin binding rejects it
+  const stolen = new Packet({
+    action: Action.PROPOSE, originId: 'bot', queryId: 'q', sender: 'bot',
+    payload: { query_vec: [...embed('q')], query_text: 'q' },
+  }).seal(signer);
+  assert.equal(hybrid.verify(stolen.signedObject(), stolen.sig), false,
+    'a stolen (key, node_id) pair fails the sender binding');
+});

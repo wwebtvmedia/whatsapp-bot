@@ -12,10 +12,14 @@
 // protocol's onPropose is sync, so chunks are fed into the node's RagStore
 // right before each inbound packet: the store is a per-request fresh view.
 
+import fs from 'node:fs';
+import path from 'node:path';
 import {
-  Packet, Action, Mode, Node, DevSigner, D3Provider, RagStore, HttpHub,
-  buildEnvelope, chunkHash, embed, queryCover, tokenize, canonicalJson, SILENT_DROP,
+  Packet, Action, Mode, Node, HybridSigner, D3Provider, RagStore, HttpHub,
+  buildEnvelope, chunkHash, embed, queryCover, tokenize, canonicalJson, SILENT_DROP, isJws,
 } from './core.mjs';
+
+const isJwsLike = isJws;
 
 // ---------------------------------------------------------------------------
 // Responder rungs — bot-local retrieval (chroma) + bot-local LLM (llama.cpp)
@@ -285,14 +289,94 @@ export async function answerQuery(query, topK = 4) {
 
 let peer = null;
 
+/**
+ * TOFU pin store (REQ-S-02): the first key bundle observed for a node_id is
+ * pinned; a different bundle is rejected until an explicit re-pin. Pins
+ * persist to a JSON file so restarts do not reset trust. `keyLookup` is the
+ * HybridSigner's resolver — kid → {signing, nodeId}, with the packet's sender
+ * bound to the pinned node at verification time.
+ */
+export class PinStore {
+  constructor({ file = process.env.OSP_PINS_FILE || null, fetchImpl = globalThis.fetch } = {}) {
+    this.file = file;
+    this.fetch = fetchImpl;
+    this.pins = new Map();                   // nodeId → {alg, kid, signing, pinned_at}
+    this.bootstrapTried = new Set();         // kids we already tried to discover
+  }
+  load() {
+    if (!this.file) return this;
+    try {
+      for (const [id, bundle] of Object.entries(JSON.parse(fs.readFileSync(this.file, 'utf8'))))
+        this.pins.set(id, bundle);
+    } catch { /* first boot or unreadable — start empty */ }
+    return this;
+  }
+  save() {
+    if (!this.file) return;
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      fs.writeFileSync(this.file, JSON.stringify(Object.fromEntries(this.pins), null, 2));
+    } catch (err) { console.warn('⚠️ OSP pin store not persisted:', err.message); }
+  }
+  keyLookup = kid => {
+    for (const [nodeId, b] of this.pins) if (b.kid === kid) return { signing: b.signing, nodeId };
+    return null;
+  };
+  /** TOFU: 'pinned' | 'unchanged' | 'rejected'. Re-pin is explicit only. */
+  pin(nodeId, bundle, { repin = false } = {}) {
+    if (!bundle?.kid || !bundle?.signing || bundle.alg !== 'EdDSA') return 'rejected';
+    const existing = this.pins.get(nodeId);
+    if (existing && repin) {
+      this.pins.set(nodeId, { ...bundle, pinned_at: new Date().toISOString() });
+      this.save();
+      return 'pinned';
+    }
+    if (existing) return existing.kid === bundle.kid && existing.signing === bundle.signing
+      ? 'unchanged' : 'rejected';
+    this.pins.set(nodeId, { ...bundle, pinned_at: new Date().toISOString() });
+    this.save();
+    return 'pinned';
+  }
+  /**
+   * First-sight key discovery: a packet sealed by an unknown kid is given ONE
+   * chance to pin itself from the sender's advertised discovery record, and
+   * only when that sender is a configured peer (we know where to ask) and the
+   * record's node_id matches the packet's sender (no impostor self-pinning).
+   */
+  async bootstrap(pkt, remotes) {
+    if (!isJwsLike(pkt.sig)) return false;
+    let kid;
+    try { kid = JSON.parse(Buffer.from(pkt.sig.split('.')[0], 'base64url').toString('utf8')).kid; }
+    catch { return false; }
+    if (!kid || this.keyLookup(kid) || this.bootstrapTried.has(kid)) return false;
+    this.bootstrapTried.add(kid);
+    const remote = remotes[pkt.sender];
+    const url = typeof remote === 'string' ? remote : remote?.url;
+    if (!url) return false;
+    try {
+      const base = url.replace(/\/osp\/packet$/, '').replace(/\/$/, '');
+      const res = await this.fetch(`${base}/osp/endpoint.json`, { signal: AbortSignal.timeout(5000) });
+      const record = await res.json();
+      const bundle = record.key_bundle;
+      if (record.node_id !== pkt.sender) return false;      // impostor record
+      return this.pin(pkt.sender, bundle) === 'pinned';
+    } catch { return false; }
+  }
+}
+
 export function getOspPeer() {
   if (peer) return peer;
-  // REQ-S-01: the HMAC dev signer is a stand-in — the shared secret must come
-  // from the environment; falling back to the well-known default is dev-grade
-  // and labelled as such (the signer label rides on every logged handshake)
+  const pins = new PinStore().load();
+  const edSeed = process.env.OSP_ED25519_SEED || null;
   const secret = process.env.OSP_SIGNING_SECRET;
-  if (!secret) console.warn('⚠️ OSP_SIGNING_SECRET unset — sealing with the well-known dev secret (dev-grade only, REQ-S-01)');
-  const signer = new DevSigner(secret || 'osp-dev-secret');
+  // REQ-S-01 posture: Ed25519 when a seed is configured; the HMAC dev signer
+  // is the labelled stand-in until every peer can verify Ed25519
+  if (!edSeed && !secret) console.warn('⚠️ OSP_ED25519_SEED unset — sealing with the well-known dev secret (dev-grade only, REQ-S-01)');
+  const signer = new HybridSigner({
+    hmacSecret: secret || 'osp-dev-secret',
+    edSeed,
+    keyLookup: pins.keyLookup,
+  });
   const rag = new RagStore();
   const responder = new Node(process.env.OSP_NODE_ID || 'whatsapp-bot', rag,
     new BotLlmProvider(), { signer });
@@ -302,7 +386,7 @@ export function getOspPeer() {
   hub.join(origin);
   responder.hub = hub;                       // inbound transport bookkeeping only
   peer = {
-    responder, origin, hub, signer, rag,
+    responder, origin, hub, signer, rag, pins,
     remotes: parseRemotes(process.env.OSP_PEERS),
     lastOutcome: null,
   };
@@ -331,13 +415,31 @@ export async function buildOspRouter(auth) {
 
   // -- discovery (same contract as the Kotlin bridge's /osp/endpoint.json) ----
   router.get('/endpoint.json', (req, res) => {
-    res.json({
+    const record = {
       node_id: p.responder.id,
       node_class: p.responder.klass,
       osp_packet_url: `${baseUrl(req)}/osp/packet`,
       packet_version: '0.6',
-      signer: 'DEV-SIGNER',
-    });
+      signer: p.signer.label,
+    };
+    // advertise the signing bundle only in Ed25519 mode — an HMAC dev record
+    // must never be pinnable by a TOFU peer
+    if (p.signer.ed) record.key_bundle = p.signer.bundle();
+    res.json(record);
+  });
+
+  // -- trust store (REQ-S-02): inspect pins, replace one explicitly ----------
+  router.get('/pins', auth, (_req, res) => {
+    res.json({ pins: Object.fromEntries(p.pins.pins) });
+  });
+  router.post('/pins/repin', auth, express.json(), (req, res) => {
+    const { node_id, bundle } = req.body || {};
+    if (!node_id || typeof node_id !== 'string' || !bundle) {
+      return res.status(400).json({ error: 'node_id (string) and bundle required' });
+    }
+    const result = p.pins.pin(node_id, bundle, { repin: true });
+    console.log(`📌 OSP re-pin ${node_id}: ${result} (kid ${bundle.kid})`);
+    res.json({ node_id, result, kid: bundle.kid ?? null });
   });
 
   // -- inbound: a remote peer (bridge app, other bot) hands us a sealed packet
@@ -353,7 +455,16 @@ export async function buildOspRouter(auth) {
     // layer 0 first (sig, version, TTL, replay, loop, gas): a forged packet
     // must cost a signature check, not a chroma query and an LLM call
     try {
-      const early = p.responder.validate(pkt);
+      let early = p.responder.validate(pkt);
+      if (early === SILENT_DROP && isJwsLike(pkt.sig)) {
+        // unknown signing key → one TOFU discovery attempt (REQ-S-02) against
+        // the sender's advertised endpoint, then retry layer 0; anything else
+        // (bad sig, replay) still drops silently
+        if (await p.pins.bootstrap(pkt, p.remotes)) {
+          console.log(`📌 OSP pinned new key for ${pkt.sender} via endpoint.json`);
+          early = p.responder.validate(pkt);
+        }
+      }
       if (early === SILENT_DROP) return res.status(204).end();
       if (early) {
         console.log(`↩️ OSP layer-0 reject to ${pkt.originId}: ${early.action} ${early.payload.reason}`);
