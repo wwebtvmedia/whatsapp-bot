@@ -14,7 +14,7 @@
 
 import {
   Packet, Action, Mode, Node, DevSigner, D3Provider, RagStore, HttpHub,
-  buildEnvelope, chunkHash, embed, queryCover, tokenize,
+  buildEnvelope, chunkHash, embed, queryCover, tokenize, canonicalJson,
 } from './core.mjs';
 
 // ---------------------------------------------------------------------------
@@ -321,7 +321,13 @@ export async function buildOspRouter(auth) {
   // -- inbound: a remote peer (bridge app, other bot) hands us a sealed packet
   router.post('/packet', auth, express.json(), async (req, res) => {
     let pkt;
-    try { pkt = Packet.fromWire(req.body); } catch { return res.status(400).json({ error: 'bad packet' }); }
+    try {
+      // raw wire text when available — number literals keep their int/float
+      // form, which re-canonicalisation needs to reproduce the sender's sig
+      pkt = req.rawBody != null
+        ? Packet.fromWireText(req.rawBody.toString('utf8'))
+        : Packet.fromWire(req.body);
+    } catch { return res.status(400).json({ error: 'bad packet' }); }
     // per-request retrieval feed: chroma → RagStore before the sync pipeline
     if (pkt.action === Action.PROPOSE || pkt.action === Action.RESOLVE) {
       const qv = embed(String(pkt.payload?.query_text ?? ''));
@@ -342,7 +348,8 @@ export async function buildOspRouter(auth) {
       if (!reply) return res.status(204).end();      // forged/replayed — silent
       const head = String(reply.payload?.answer ?? '').slice(0, 120).replace(/\s+/g, ' ');
       console.log(`↩️ OSP reply to ${pkt.originId}: ${reply.action} ${reply.payload?.reason ?? reply.payload?.bid ?? ''}${head ? ` | "${head}"` : ''} prov=${(reply.payload?.provenance ?? []).length}`);
-      res.json(reply.toWire());
+      // canonical bytes — res.json would re-stringify float fields as integers
+      res.type('application/json').send(canonicalJson(reply.toWire()));
     } catch (err) {
       console.error('❌ OSP packet handling failed:', err.message);
       res.status(500).json({ error: 'packet handling failed' });

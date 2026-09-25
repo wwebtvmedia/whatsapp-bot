@@ -328,7 +328,11 @@ const { version: appVersion } = JSON.parse(
 // Express API setup
 const app = express();
 const upload = multer();
-app.use(express.json());
+app.use(express.json({
+  // keep the raw body for the OSP endpoints: signature verification must
+  // re-canonicalise the packet with each number literal's original form
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Auth Middleware — fails closed: an unset API_TOKEN must never disable auth

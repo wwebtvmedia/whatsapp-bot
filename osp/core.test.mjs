@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   embed, similarity, chunkHash, canonicalJson, DevSigner, Packet, Action, Mode,
   Node, InMemoryHub, RagStore, EchoGroundedProvider, ConfabulatingProvider,
-  pyDouble, buildEnvelope, tokenize, queryCover,
+  pyDouble, buildEnvelope, tokenize, queryCover, parseWire, PyFloat, pyf,
 } from './core.mjs';
 
 const T1 = 'hydraulic pump failure is caused by cavitation and worn seals';
@@ -123,4 +123,101 @@ test('RagStore.retrieve ranks by query-side coverage', () => {
   assert.ok(hits.length > 0);
   assert.equal(hits[0].score, 1.0);
   assert.equal(hits[0].chunk.hash, chunkHash('<the café exoskeleton and its tactile review>'));
+});
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — canonical parity of number literals (5.2.1) and of
+// astral characters. Vectors sealed by the Python reference with
+// DevSigner(b'osp-dev-secret'); before the fix both verified() returned false
+// here (integer floats collapsed to "1", emoji escaped as invalid "ὠ0"),
+// and the responder answered a legitimate peer with silent 204s.
+// ---------------------------------------------------------------------------
+
+// BID with integer-valued floats (retrieval_similarity 1.0, provenance score 1.0)
+const BID_WIRE = '{"v":"0.6","packet_id":"pktv1fixed12","jti":"jtiv1fixed1616ab",' +
+  '"ts":1758372366.25,"exp_s":60,"action":"BID","origin_id":"py-origin",' +
+  '"query_id":"q-v1","sender":"py-node","gas":2,' +
+  '"trail":[{"node":"py-node","action":"BID"}],"payload":{"bid":0.786,' +
+  '"retrieval_similarity":1.0,"reputation":0.5,"node_class":"N2","can_generate":true,' +
+  '"provenance":[{"chunk_hash":"h1","score":1.0}]},' +
+  '"sig":"50fde05f82ba083fc856e1e8bd91ae25c44e50c8e848dedc48d40b76fbe0f256"}';
+
+// PROPOSE whose query_text carries an astral emoji, accents and quotes
+const PROPOSE_WIRE = '{"v":"0.6","packet_id":"pktv2fixed12","jti":"jtiv2fixed1616ab",' +
+  '"ts":1758372366.5,"exp_s":60,"action":"PROPOSE","origin_id":"py-origin",' +
+  '"query_id":"q-v2","sender":"py-node","gas":3,"trail":[],"payload":{' +
+  '"query_vec":[3,7,42,255,0],"query_text":"pourquoi ça marche 😀 ? \\"quote\\" — éàü"},' +
+  '"sig":"538ed9d383d3691398d29e28359c5e5f127f4b101bec17533ba540434763bfe8"}';
+
+// ACK whose mapping_distance is the float 0.0 — the ".0" is part of the sig
+const ACK_WIRE = '{"v":"0.6","packet_id":"pktv3fixed12","jti":"jtiv3fixed1616ab",' +
+  '"ts":1758372366.125,"exp_s":60,"action":"ACK","origin_id":"py-origin",' +
+  '"query_id":"q-v3","sender":"py-node","gas":1,' +
+  '"trail":[{"node":"py-node","action":"ALIGN"}],"payload":{"mapping_distance":0.0,' +
+  '"source":"bonjour","target":"h-abc"},' +
+  '"sig":"9bb104e734a7ed41bfc23151330c6cf39608f7176e27a5dc4a9eaa048b695a01"}';
+
+test('parseWire keeps int and float literal forms apart', () => {
+  const o = parseWire('{"i":3,"f":1.0,"e":2e1,"neg":-2.5}');
+  assert.equal(o.i, 3);
+  assert.ok(!(o.i instanceof PyFloat));
+  assert.ok(o.f instanceof PyFloat);
+  assert.equal(Number(o.f), 1);
+  assert.ok(o.e instanceof PyFloat);
+  assert.equal(Number(o.e), 20);
+  assert.ok(o.neg instanceof PyFloat);
+  assert.equal(Number(o.neg), -2.5);
+});
+
+test('BID sealed by Python with integer-valued floats verifies (B1)', () => {
+  const signer = new DevSigner();
+  assert.equal(Packet.fromWireText(BID_WIRE).verified(signer), true);
+  // via JSON.parse the literals collapse (1.0 → 1) — the sig cannot reproduce
+  assert.equal(Packet.fromWire(JSON.parse(BID_WIRE)).verified(signer), false);
+  assert.equal(Packet.fromWireText(ACK_WIRE).verified(signer), true);
+});
+
+test('PROPOSE sealed by Python with an astral emoji verifies (B2)', () => {
+  assert.equal(Packet.fromWireText(PROPOSE_WIRE).verified(new DevSigner()), true);
+});
+
+test('astral characters escape as UTF-16 surrogate pairs', () => {
+  assert.equal(canonicalJson({ t: 'a😀b' }), '{"t":"a\\ud83d\\ude00b"}');
+  // round-trips through parseWire without corruption
+  const o = parseWire('{"t":"a😀b"}');
+  assert.equal(o.t, 'a😀b');
+});
+
+test('JS seals what Python seals — byte parity on the golden vectors', () => {
+  const signer = new DevSigner();
+  const bid = new Packet({
+    action: Action.BID, originId: 'py-origin', queryId: 'q-v1', sender: 'py-node',
+    gas: 2, trail: [{ node: 'py-node', action: 'BID' }],
+    packetId: 'pktv1fixed12', jti: 'jtiv1fixed1616ab', ts: 1758372366.25, expS: 60,
+    payload: { bid: pyf(0.786), retrieval_similarity: pyf(1), reputation: pyf(0.5),
+      node_class: 'N2', can_generate: true,
+      provenance: [{ chunk_hash: 'h1', score: pyf(1) }] },
+  }).seal(signer);
+  assert.equal(bid.sig, '50fde05f82ba083fc856e1e8bd91ae25c44e50c8e848dedc48d40b76fbe0f256');
+
+  const ack = new Packet({
+    action: Action.ACK, originId: 'py-origin', queryId: 'q-v3', sender: 'py-node',
+    gas: 1, trail: [{ node: 'py-node', action: 'ALIGN' }],
+    packetId: 'pktv3fixed12', jti: 'jtiv3fixed1616ab', ts: 1758372366.125, expS: 60,
+    payload: { mapping_distance: pyf(0), source: 'bonjour', target: 'h-abc' },
+  }).seal(signer);
+  assert.equal(ack.sig, '9bb104e734a7ed41bfc23151330c6cf39608f7176e27a5dc4a9eaa048b695a01');
+});
+
+test('a Python-sealed PROPOSE is processed, not silently dropped (B1+B2 end to end)', async () => {
+  const hub = new InMemoryHub();
+  const responder = new Node('bot', new RagStore([T1]), new EchoGroundedProvider());
+  responder.attach(hub);
+  // the vector's ts is in the past, so the honest answer is the 'expired' RFO —
+  // the regression being pinned is that the packet is VERIFIED and handled at
+  // all: before the fix onPacket returned null (silent 204 on the wire)
+  const reply = responder.onPacket(Packet.fromWireText(PROPOSE_WIRE));
+  assert.ok(reply, 'a verified packet must never be silently dropped');
+  assert.equal(reply.action, Action.RFO);
+  assert.equal(reply.payload.reason, 'expired');
 });

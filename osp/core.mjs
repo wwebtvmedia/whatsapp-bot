@@ -54,8 +54,22 @@ export function pyDouble(d) {
   return (neg ? '-' : '') + out;
 }
 
+/**
+ * Marker for Python/Kotlin-float values. JSON has no int/float distinction but
+ * the canonical form does ("1" vs "1.0", clause 5.2.1), so every float-typed
+ * protocol field is wrapped to serialise through pyDouble — matching what
+ * Python's repr() and the Kotlin mini-JSON emit for the same value.
+ */
+export class PyFloat {
+  constructor(value) { this.value = value; }
+  valueOf() { return this.value; }                 // arithmetic & comparisons stay transparent
+  toJSON() { return this.value; }                  // unsigned paths degrade to the plain number
+}
+export const pyf = v => new PyFloat(v);
+
 function writeJson(v, sb) {
   if (v === null || v === undefined) { sb.push('null'); return; }
+  if (v instanceof PyFloat) { sb.push(pyDouble(Number(v.value))); return; }
   switch (typeof v) {
     case 'string': sb.push(escapeStr(v)); return;
     case 'number':
@@ -86,17 +100,20 @@ function writeJson(v, sb) {
 
 function escapeStr(s) {
   let out = '"';
-  for (const ch of s) {
-    const c = ch.codePointAt(0);
-    if (ch === '"') out += '\\"';
-    else if (ch === '\\') out += '\\\\';
-    else if (ch === '\n') out += '\\n';
-    else if (ch === '\r') out += '\\r';
-    else if (ch === '\t') out += '\\t';
-    else if (ch === '\b') out += '\\b';
-    else if (ch === '\f') out += '\\f';
+  // UTF-16 code units, not code points: astral chars escape as the surrogate
+  // pair "😀" — Python ensure_ascii and Kotlin do the same, while a
+  // 5-hex-digit "ὠ0" would be invalid JSON and silently corrupt signatures
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x22) out += '\\"';
+    else if (c === 0x5c) out += '\\\\';
+    else if (c === 0x0a) out += '\\n';
+    else if (c === 0x0d) out += '\\r';
+    else if (c === 0x09) out += '\\t';
+    else if (c === 0x08) out += '\\b';
+    else if (c === 0x0c) out += '\\f';
     else if (c < 0x20 || c > 0x7e) out += '\\u' + c.toString(16).padStart(4, '0');
-    else out += ch;
+    else out += s[i];
   }
   return out + '"';
 }
@@ -110,6 +127,42 @@ export function canonicalJson(v) {
 
 /** Minimal JSON.parse passthrough (Node's parser is fine; kept for symmetry). */
 export const parseJson = JSON.parse;
+
+const PYF = '\u0000pyf:';                 // reviver sentinel — NUL + tag, never a real protocol string
+
+/**
+ * JSON.parse that keeps each number literal's form: "3" arrives a number,
+ * "1.0"/"1e5" arrive wrapped as PyFloat — so re-canonicalising a received
+ * packet reproduces the sender's bytes exactly (clause 5.2.1), which
+ * JSON.parse alone cannot (it collapses 1.0 to 1). Float literals are marked
+ * by quoting them behind the sentinel before parsing; the reviver unwraps
+ * them. A genuine string starting with the sentinel is effectively impossible
+ * in protocol fields, and its worst case is a failed verification (fail-closed).
+ */
+export function parseWire(text) {
+  const out = [];
+  const n = text.length;
+  let i = 0, inStr = false;
+  while (i < n) {
+    const c = text[i];
+    if (inStr) {
+      if (c === '\\') { out.push(c, text[i + 1] ?? ''); i += 2; continue; }
+      if (c === '"') inStr = false;
+      out.push(c); i++; continue;
+    }
+    if (c === '"') { inStr = true; out.push(c); i++; continue; }
+    if ((c >= '0' && c <= '9') || c === '-') {
+      let j = i + 1;
+      while (j < n && /[-+.eE0-9]/.test(text[j])) j++;
+      const lit = text.slice(i, j);
+      out.push(/^-?\d+$/.test(lit) ? lit : `"\\u0000pyf:${lit}"`);   // escaped NUL — legal JSON
+      i = j; continue;
+    }
+    out.push(c); i++;
+  }
+  return JSON.parse(out.join(''), (_k, v) =>
+    typeof v === 'string' && v.startsWith(PYF) ? new PyFloat(Number(v.slice(PYF.length))) : v);
+}
 
 // ---------------------------------------------------------------------------
 // Signers — DEV-SIGNER (HMAC-SHA256) only; production must use Ed25519 (REQ-S-01)
@@ -222,7 +275,10 @@ export class Packet {
                 expS = 60, version = PACKET_VERSION }) {
     this.action = action; this.originId = originId; this.queryId = queryId;
     this.sender = sender; this.gas = gas; this.trail = trail; this.payload = payload;
-    this.packetId = packetId; this.jti = jti; this.ts = ts; this.expS = expS;
+    this.packetId = packetId; this.jti = jti;
+    // ts is a Python float (time.time()) on the wire — always emit the .0 form
+    this.ts = ts instanceof PyFloat ? ts : pyf(Number(ts));
+    this.expS = expS;
     this.version = version; this.sig = '';
   }
   signedObject() {
@@ -246,6 +302,8 @@ export class Packet {
     p.sig = m.sig;
     return p;
   }
+  /** fromWire over raw wire text — number literals keep their int/float form. */
+  static fromWireText(text) { return Packet.fromWire(parseWire(text)); }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +452,9 @@ export class HttpHub {
     const res = await this.fetch(packetUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify(pkt.toWire()),
+      // canonical bytes, not JSON.stringify: float-typed fields must keep their
+      // "1.0" literal form or the receiver cannot reproduce our signature
+      body: canonicalJson(pkt.toWire()),
     });
     if (res.status === 204) return null;
     const wire = await res.json();
@@ -463,12 +523,12 @@ export class Node {
       sender: this.id, gas: pkt.gas - 1,
       trail: [...pkt.trail, { node: this.id, action: 'BID' }],
       payload: {
-        bid,
-        retrieval_similarity: score,
-        reputation: rep,
+        bid: pyf(bid),
+        retrieval_similarity: pyf(score),
+        reputation: pyf(rep),
         node_class: this.klass,
         can_generate: this.d3 != null && this.d3.available && this.budget.left > 0,
-        provenance: chunks.map(c => ({ chunk_hash: c.chunk.hash, score: c.score })),
+        provenance: chunks.map(c => ({ chunk_hash: c.chunk.hash, score: pyf(c.score) })),
       },
     }).seal(this.signer);
   }
@@ -492,7 +552,7 @@ export class Node {
       action: Action.ACK, originId: pkt.originId, queryId: pkt.queryId,
       sender: this.id, gas: pkt.gas - 1,
       trail: [...pkt.trail, { node: this.id, action: 'ALIGN' }],
-      payload: { mapping_distance: dist, source, target },
+      payload: { mapping_distance: pyf(dist), source, target },
     }).seal(this.signer);
   }
 
