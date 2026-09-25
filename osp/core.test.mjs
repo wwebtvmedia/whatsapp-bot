@@ -346,3 +346,74 @@ test('a wrong protocol version gets an explicit MISMATCH RFO (m2)', () => {
   assert.equal(rfo.payload.mode, Mode.MISMATCH);
   assert.ok(rfo.payload.reason.includes('0.5'));
 });
+
+test('jti memory expires with the TTL window instead of growing forever (m1)', () => {
+  const responder = new Node('bot', new RagStore([T1]), new EchoGroundedProvider());
+  responder.rememberJti('abc', 60);
+  assert.equal(responder.seenJti('abc'), true);
+  assert.equal(responder.jtiCache.size, 1);
+  // once its window passes, the id is forgotten — the cache cannot grow
+  responder.jtiCache.set('abc', (Date.now() / 1000) - 1);
+  assert.equal(responder.seenJti('abc'), false);
+  assert.equal(responder.jtiCache.size, 0, 'expired entry swept on read');
+});
+
+test('a BID without provenance is filtered out, not a crash (m8)', async () => {
+  const signer = new DevSigner();
+  const origin = new Node('origin', new RagStore(), null);
+  // stub hub returning a provenance-less BID — used to throw TypeError
+  const bid = new Packet({
+    action: Action.BID, originId: 'origin', queryId: newId(12), sender: 'bot',
+    gas: 2, payload: { bid: pyf(0.9), retrieval_similarity: pyf(0.8), reputation: pyf(0.5),
+      node_class: 'N2', can_generate: true, provenance: [] },
+  }).seal(signer);
+  origin.attach({ join() {}, peers: () => ['bot'], send: async () => bid });
+  const out = await origin.query(T2, 0);
+  assert.equal(out.mode, Mode.NO_QUORUM, 'no votable provenance → honest abstention');
+});
+
+test('a provider needing two generations reconciles the budget (m4/5.6.3)', async () => {
+  const d3 = { name: 'fake', remote: false, available: true,
+    generate: async (_q, _c) => ({ answer: 'hydraulic pump failure', cost: { generations: 2 } }) };
+  const hub = new InMemoryHub();
+  const origin = new Node('origin', new RagStore(), null);
+  const responder = new Node('bot', new RagStore([T1]), d3);
+  origin.attach(hub);
+  responder.attach(hub);
+  const out = await origin.query(T2, 0);
+  assert.equal(out.mode, Mode.RESOLVED);
+  assert.equal(responder.budget.spent, 2, 'pre-charged 1 + reconciled 1');
+});
+
+test('the translated query reaches generate() through the packet, no global (m9)', async () => {
+  let seenCtx = null;
+  const d3 = { name: 'fake', remote: false, available: true,
+    generate: async (q, _c, ctx) => { seenCtx = { q, ctx };
+      return { answer: 'answer', cost: { generations: 1 } }; } };
+  const hub = new InMemoryHub();
+  const origin = new Node('origin', new RagStore(), null);
+  const responder = new Node('bot', new RagStore([T1]), d3);
+  origin.attach(hub);
+  responder.attach(hub);
+  // arm the override the way the /packet handler does — on the packet itself
+  const propose = new Packet({
+    action: Action.PROPOSE, originId: 'origin', queryId: newId(12), sender: 'origin',
+    gas: 3, payload: { query_vec: [...embed(T2)], query_text: T2 },
+  }).seal(new DevSigner());
+  const bid = responder.onPacket(propose);
+  const align = new Packet({
+    action: Action.ALIGN, originId: 'origin', queryId: bid.queryId, sender: 'origin',
+    gas: 3, payload: { query_vec: [...embed(T2)], source: T2, target: bid.payload.provenance[0].chunk_hash },
+  }).seal(new DevSigner());
+  responder.onPacket(align);
+  const resolve = new Packet({
+    action: Action.RESOLVE, originId: 'origin', queryId: bid.queryId, sender: 'origin',
+    gas: 3,
+    payload: { query_vec: [...embed(T2)], query_text: T2 },
+  }).seal(new DevSigner());
+  resolve.envelopeQuery = 'pompe hydraulique (traduit)';   // armed by the /packet route
+  const reply = await responder.onPacket(resolve);
+  assert.equal(reply.action, Action.RESOLVE);
+  assert.equal(seenCtx.ctx.envelopeQuery, 'pompe hydraulique (traduit)');
+  assert.equal(seenCtx.q, T2, 'the raw query stays the fallback grounding');
+});

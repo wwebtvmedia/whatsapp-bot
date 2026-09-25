@@ -484,7 +484,7 @@ export class Node {
     this.klass = klass || (d3 == null ? 'N1' : (d3.remote ? 'N3' : 'N2'));
     this.budget = new Budget();
     this.reputation = new Map();
-    this.jtiCache = new Set();
+    this.jtiCache = new Map();              // jti → expiry ts — bounded, swept (5.2.2)
     this.mappingCache = new Map();
     this.hooks = {};
     this.hub = null;
@@ -497,12 +497,27 @@ export class Node {
    * packet may proceed to a handler. Transports call this FIRST so a forged
    * packet costs a signature check, not a chroma query or an LLM call.
    */
+  /** Replay protection (5.2.2): jti remembered for its TTL window only. */
+  seenJti(jti) {
+    const exp = this.jtiCache.get(jti);
+    if (exp === undefined) return false;
+    if (exp <= Date.now() / 1000) { this.jtiCache.delete(jti); return false; }
+    return true;
+  }
+  rememberJti(jti, ttlS) {
+    this.jtiCache.set(jti, Date.now() / 1000 + Math.min(Math.max(ttlS, 60), 3600));
+    if (this.jtiCache.size > 1024) {          // lazy sweep keeps the cache bounded
+      const now = Date.now() / 1000;
+      for (const [k, exp] of this.jtiCache) if (exp <= now) this.jtiCache.delete(k);
+    }
+  }
+
   validate(pkt) {
     if (!pkt.verified(this.signer)) return SILENT_DROP;
     if (pkt.version !== PACKET_VERSION)
       return this.rfo(pkt, Mode.MISMATCH, `unsupported protocol version ${pkt.version}`);
     if (pkt.expired()) return this.rfo(pkt, Mode.GAS_EXHAUSTED, 'expired');
-    if (this.jtiCache.has(pkt.jti)) return SILENT_DROP;
+    if (this.seenJti(pkt.jti)) return SILENT_DROP;
     if (pkt.trail.some(h => h.node === this.id))
       return this.rfo(pkt, Mode.LOOP_DETECTED, `${this.id} seen in trail`);
     if (pkt.gas <= 0 && pkt.action !== Action.RFO)
@@ -514,7 +529,7 @@ export class Node {
     const early = this.validate(pkt);
     if (early === SILENT_DROP) return null;
     if (early) return early;                   // the layer-0 RFO
-    this.jtiCache.add(pkt.jti);
+    this.rememberJti(pkt.jti, pkt.expS);
     switch (pkt.action) {
       case Action.PROPOSE: return this.onPropose(pkt);
       case Action.ALIGN: return this.onAlign(pkt);
@@ -588,11 +603,18 @@ export class Node {
     if (!this.budget.charge()) return this.rfo(pkt, Mode.NO_QUORUM, 'generation budget exhausted');
     let out;
     try {
+      // ctx rides the packet instance — concurrent negotiations cannot cross
+      // wires (this used to be a module-global override)
       out = await this.d3.generate(pkt.payload.query_text,
-        chunks.map(c => ({ hash: c.chunk.hash, text: c.chunk.text })));
+        chunks.map(c => ({ hash: c.chunk.hash, text: c.chunk.text })),
+        { queryId: pkt.queryId, originId: pkt.originId,
+          envelopeQuery: pkt.envelopeQuery ?? null });
     } catch (e) {
       return this.rfo(pkt, Mode.NO_QUORUM, `provider failure: ${e.message}`);
     }
+    // the gate pre-charged one generation; a provider that needed more
+    // (sampling-variance retry) reconciles the difference (5.6.3)
+    if ((out.cost?.generations ?? 1) > 1) this.budget.charge(out.cost.generations - 1);
     return new Packet({
       action: Action.RESOLVE, originId: pkt.originId, queryId: pkt.queryId,
       sender: this.id, gas: pkt.gas - 1,
@@ -651,7 +673,8 @@ export class Node {
     const seen = new Set();
     const diverse = bids.sort((a, b) => b.payload.bid - a.payload.bid)
       .filter(b => {
-        const h = b.payload.provenance[0].chunk_hash;
+        const h = b.payload.provenance?.[0]?.chunk_hash;   // a bid without
+        if (h == null) return false;                      // provenance can't be voted
         if (seen.has(h)) return false;
         seen.add(h);
         return true;

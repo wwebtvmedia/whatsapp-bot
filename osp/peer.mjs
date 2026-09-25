@@ -47,10 +47,29 @@ export function dropUncovered(query, texts) {
   return texts.filter((t, i) => i === 0 || covers[i] >= 0.75 * best);
 }
 
-// Set by the /packet handler when retrieval translated the query: the sealed
-// generation grounds on the translated wording (same intent, corpus language).
-// Cleared right after use — packets are served one at a time in practice.
-let envelopeQueryOverride = null;
+// The translated query rides the packet instance (pkt.envelopeQuery → the
+// generate() ctx): the sealed generation grounds on the translated wording
+// (same intent, corpus language) without a module global two concurrent
+// packets could race on.
+
+/** RagStore cap for the per-request feed: enough to keep every cited chunk of
+ * the recent negotiations GET_CHUNK-servable, small enough to stay a
+ * per-proposal scan. */
+export const OSP_RAG_MAX = 256;
+
+/** Merge freshly retrieved chunks into the store, newest wins, bounded —
+ * entries already in the fresh set are dropped then re-added at the end so
+ * they keep their refreshed vec. Mutates entries, returns it. */
+export function mergeChunks(entries, texts, max = OSP_RAG_MAX) {
+  const fresh = texts.map(t => ({ hash: chunkHash(t), text: t, vec: embed(t) }));
+  const freshHashes = new Set(fresh.map(c => c.hash));
+  const room = Math.max(0, max - fresh.length);
+  const kept = room > 0
+    ? entries.filter(e => !freshHashes.has(e.hash)).slice(-room)
+    : [];
+  entries.splice(0, entries.length, ...kept, ...fresh);
+  return entries;
+}
 
 /** Small ollama call for query translation — never routes through the sealed
  * generate() (this is preprocessing, not an answer). */
@@ -227,22 +246,24 @@ export class BotLlmProvider extends D3Provider {
     return answer;
   }
 
-  async generate(query, chunks) {
-    const envelope = buildEnvelope(envelopeQueryOverride || query, chunks);
-    envelopeQueryOverride = null;
-    let answer = await this.chat(envelope);
+  async generate(query, chunks, ctx = {}) {
+    const envelope = buildEnvelope(ctx.envelopeQuery || query, chunks);
+    let calls = 0;
+    const ask = async timeoutMs => { calls += 1; return this.chat(envelope, { timeoutMs }); };
+    let answer = await ask(150_000);
     // sampling variance: gemma abstains on some draws even with the answer
     // literally in the first chunk — one identical retry recovers most of
     // those (150s + 120s stays inside the origin's 300s patience)
     if (isInsufficientEvidence(answer)) {
-      answer = await this.chat(envelope, { timeoutMs: 120_000 }).catch(err => {
+      answer = await ask(120_000).catch(err => {
         console.warn('⚠️ OSP retry generation failed:', err.message);
         return null;
       });
     }
     if (!answer) throw new Error('LLM returned no content');
     if (isInsufficientEvidence(answer)) throw new Error('no answer in evidence');
-    return { answer, provider: this.name, cost: { generations: 1 } };
+    // honest cost: the retry IS a generation, the budget reconciles for it
+    return { answer, provider: this.name, cost: { generations: calls } };
   }
 }
 
@@ -252,14 +273,10 @@ export class BotLlmProvider extends D3Provider {
  * carries the translated query just like the /packet handler arms it. */
 export async function answerQuery(query, topK = 4) {
   const { texts, query: effectiveQuery } = await retrieveFromBotMemory(query, topK);
-  envelopeQueryOverride = effectiveQuery !== query ? effectiveQuery : null;
-  try {
-    const chunks = texts.map(t => ({ hash: chunkHash(t), text: t }));
-    const out = await new BotLlmProvider().generate(query, chunks);
-    return { ...out, effectiveQuery, texts };
-  } finally {
-    envelopeQueryOverride = null;
-  }
+  const chunks = texts.map(t => ({ hash: chunkHash(t), text: t }));
+  const out = await new BotLlmProvider().generate(query, chunks,
+    { envelopeQuery: effectiveQuery !== query ? effectiveQuery : null });
+  return { ...out, effectiveQuery, texts };
 }
 
 // ---------------------------------------------------------------------------
@@ -343,23 +360,23 @@ export async function buildOspRouter(auth) {
         return res.type('application/json').send(canonicalJson(early.toWire()));
       }
     } catch { return res.status(204).end(); }
-    // per-request retrieval feed: chroma → RagStore before the sync pipeline
+    // per-request retrieval feed: chroma → RagStore, merged newest-wins and
+    // bounded so chunks cited by earlier negotiations stay GET_CHUNK-servable
+    // (5.3.5) instead of being wiped by each packet
     if (pkt.action === Action.PROPOSE || pkt.action === Action.RESOLVE) {
       const qv = embed(String(pkt.payload?.query_text ?? ''));
       if (qv.some(b => b !== 0)) {
         const { texts, query: effectiveQuery } = await retrieveFromBotMemory(String(pkt.payload.query_text));
-        p.rag.entries.splice(0, p.rag.entries.length,
-          ...texts.map(t => ({ hash: chunkHash(t), text: t, vec: embed(t) })));
+        mergeChunks(p.rag.entries, texts, OSP_RAG_MAX);
         const top = p.rag.retrieve(qv)[0]?.score ?? 0;
         console.log(`🧩 OSP propose from ${pkt.originId}: "${String(pkt.payload.query_text).slice(0, 60)}" → ${texts.length} chunks, top_cover=${top}`);
-        envelopeQueryOverride = effectiveQuery !== String(pkt.payload.query_text) ? effectiveQuery : null;
+        pkt.envelopeQuery = effectiveQuery !== String(pkt.payload.query_text) ? effectiveQuery : null;
       }
     }
     try {
       // onResolve is async (LLM generation) — await keeps the wire contract:
       // one sealed reply packet per request
       const reply = await p.responder.onPacket(pkt);
-      envelopeQueryOverride = null;
       if (!reply) return res.status(204).end();      // forged/replayed — silent
       const head = String(reply.payload?.answer ?? '').slice(0, 120).replace(/\s+/g, ' ');
       console.log(`↩️ OSP reply to ${pkt.originId}: ${reply.action} ${reply.payload?.reason ?? reply.payload?.bid ?? ''}${head ? ` | "${head}"` : ''} prov=${(reply.payload?.provenance ?? []).length}`);
@@ -388,8 +405,8 @@ export async function buildOspRouter(auth) {
     }
   });
 
-  // -- status -----------------------------------------------------------------
-  router.get('/status', (_req, res) => {
+  // -- status (authenticated: last_outcome echoes a full answer) --------------
+  router.get('/status', auth, (_req, res) => {
     res.json({
       node_id: p.responder.id,
       node_class: p.responder.klass,

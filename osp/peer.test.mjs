@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { embed } from './core.mjs';
-import { rerankByCover, isInsufficientEvidence, dropUncovered, focusDocument } from './peer.mjs';
+import { rerankByCover, isInsufficientEvidence, dropUncovered, focusDocument, mergeChunks } from './peer.mjs';
 
 test('focusDocument anchors on a manifest, drops other-document filler', () => {
   const manifest = '[Document STRAT.Pdf]\nTitre du document: TOUTES LES STRATÉGIES';
@@ -75,4 +75,41 @@ test('isInsufficientEvidence matches the sentinel, not real answers', () => {
     'The full title is INSUFFICIENT_EVIDENCE-like, actually no', '']) {
     assert.ok(!isInsufficientEvidence(a), `should NOT match: ${a}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Non-reg 2026-09-25 — the per-request feed merged by replacement, so a
+// GET_CHUNK for a chunk cited one negotiation earlier answered "unknown
+// chunk" (5.3.5). mergeChunks keeps the recent history, newest wins, bounded.
+// Also: the retry generation is reported honestly in cost.generations.
+// ---------------------------------------------------------------------------
+
+test('mergeChunks keeps earlier chunks servable, newest wins, bounded', () => {
+  const entries = mergeChunks([], ['chunk one', 'chunk two']);
+  assert.equal(entries.length, 2);
+  const hashes = entries.map(e => e.hash);
+  // a later feed keeps the old chunks and appends the new ones
+  mergeChunks(entries, ['chunk two', 'chunk three']);
+  assert.deepEqual(entries.map(e => e.text),
+    ['chunk one', 'chunk two', 'chunk three']);
+  // the cap trims the OLDEST first
+  const small = mergeChunks([], ['a', 'b']);
+  mergeChunks(small, ['b', 'c'], 3);
+  assert.deepEqual(small.map(e => e.text), ['a', 'b', 'c']);
+  mergeChunks(small, ['d'], 3);
+  assert.deepEqual(small.map(e => e.text), ['b', 'c', 'd']);
+  assert.ok(hashes.includes(entries[0].hash));
+});
+
+test('BotLlmProvider reports the retry in cost.generations (m4)', async () => {
+  const { BotLlmProvider } = await import('./peer.mjs');
+  const p = new BotLlmProvider();
+  let calls = 0;
+  p.chat = async () => (calls += 1, calls === 1 ? 'INSUFFICIENT_EVIDENCE' : 'The pump failed.');
+  const out = await p.generate('why?', [{ hash: 'h', text: 'the pump failed' }]);
+  assert.equal(out.cost.generations, 2, 'the retry is a generation, counted as one');
+  // a first-draw answer stays one generation
+  p.chat = async () => (calls += 1, 'Direct answer.');
+  const one = await p.generate('why?', [{ hash: 'h', text: 'evidence' }]);
+  assert.equal(one.cost.generations, 1);
 });
