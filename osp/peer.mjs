@@ -475,6 +475,9 @@ export async function buildOspRouter(auth) {
         if (await p.pins.bootstrap(pkt, p.remotes)) {
           console.log(`📌 OSP pinned new key for ${pkt.sender} via endpoint.json`);
           early = p.responder.validate(pkt);
+        } else {
+          console.log(`🚫 OSP TOFU bootstrap missed for ${pkt.sender} ` +
+            `(kid known-tried or sender not in OSP_PEERS)`);
         }
       }
       if (early === SILENT_DROP) return res.status(204).end();
@@ -482,7 +485,10 @@ export async function buildOspRouter(auth) {
         console.log(`↩️ OSP layer-0 reject to ${pkt.originId}: ${early.action} ${early.payload.reason}`);
         return res.type('application/json').send(canonicalJson(early.toWire()));
       }
-    } catch { return res.status(204).end(); }
+    } catch (err) {
+      console.error('❌ OSP layer-0 failed:', err.message);
+      return res.status(204).end();
+    }
     // per-request retrieval feed: chroma → RagStore, merged newest-wins and
     // bounded so chunks cited by earlier negotiations stay GET_CHUNK-servable
     // (5.3.5) instead of being wiped by each packet
