@@ -20,7 +20,7 @@ export function dayKey(date) {
 export async function initDatabase(mongoUrl, chromaUrl, dbName = 'mcp', collectionName = 'messages', chromaRawName = 'messages', chromaDaysName = 'conversation_days') {
   try {
     // MongoDB setup
-    mongoClient = new MongoClient(mongoUrl);
+    mongoClient = new MongoClient(mongoUrl, { serverSelectionTimeoutMS: 2000 });
     await mongoClient.connect();
     const db = mongoClient.db(dbName);
     messageCollection = db.collection(collectionName);

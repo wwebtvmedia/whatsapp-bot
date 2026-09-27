@@ -42,13 +42,121 @@ const VISION_MODEL = process.env.MEDIA_VISION_MODEL || '';
 const MAX_VISION_PAGES = parseInt(process.env.MEDIA_VISION_PAGES || '6', 10);
 // Vision calls must never hang the ingestion: bounded generation + hard timeout
 const VISION_TIMEOUT_MS = parseInt(process.env.MEDIA_VISION_TIMEOUT_MS || '120000', 10);
+// Neural OCR model (e.g. Baidu Unlimited OCR: frob/unlimited-ocr:latest) via Ollama API
+const OCR_MODEL = process.env.MEDIA_OCR_MODEL || process.env.OCR_MODEL || '';
+const OCR_TIMEOUT_MS = parseInt(process.env.MEDIA_OCR_TIMEOUT_MS || '120000', 10);
 // Language data is downloaded on first OCR and cached outside the app dir
 const TESSDATA_DIR = path.join(os.tmpdir(), 'tessdata');
 
-// One tesseract worker for any number of images (creating one per page would
-// reload the language model each time). Returns one entry per input image
-// ('' when nothing was recognized) so callers can keep page alignment.
-async function ocrImages(imagePaths, ocrLang) {
+function getOllamaUrl(explicitUrl) {
+  const base = (explicitUrl || process.env.MEDIA_OCR_URL || process.env.OCR_URL || process.env.VISION_URL || process.env.OLLAMA_URL || process.env.LLM_URL || 'http://localhost:11434').trim();
+  if (base.endsWith('/api/chat') || base.endsWith('/api/generate') || base.endsWith('/v1/chat/completions')) {
+    return base;
+  }
+  return `${base.replace(/\/+$/, '')}/api/chat`;
+}
+
+/**
+ * Format raw output from DeepSeek-OCR / Baidu Unlimited OCR models.
+ * Strips grounding bounding boxes (e.g. `[y1, x1, y2, x2]`) and normalizes
+ * element tags (`title`, `header`, `text`, `list`, `table`) to Markdown.
+ * @param {string} raw
+ * @returns {string}
+ */
+export function formatOcrModelOutput(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const lines = raw.split('\n');
+  const formatted = [];
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Pattern: tag [ymin, xmin, ymax, xmax]Content or [ymin, xmin, ymax, xmax]Content
+    const tagMatch = trimmed.match(/^([a-zA-Z0-9_-]+)?\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]\s*(.*)$/);
+    if (tagMatch) {
+      const tag = (tagMatch[1] || '').toLowerCase();
+      let content = (tagMatch[2] || '').trim();
+      if (!content) continue;
+
+      if (tag === 'title') {
+        if (!content.startsWith('#')) content = `# ${content}`;
+      } else if (tag === 'header' || tag === 'section_header' || tag === 'sub_title') {
+        if (!content.startsWith('#')) content = `## ${content}`;
+      } else if (tag === 'list' || tag === 'item') {
+        if (!content.startsWith('-') && !content.startsWith('*')) content = `- ${content}`;
+      }
+      formatted.push(content);
+    } else {
+      formatted.push(trimmed);
+    }
+  }
+  return formatted.join('\n');
+}
+
+/**
+ * OCR a single image using a remote/local vision OCR model (Ollama /api/chat).
+ * Returns formatted text on success, or null on failure / missing model.
+ * @param {string} imagePath
+ * @param {{ocrModel?: string, ocrUrl?: string, prompt?: string}} [opts]
+ * @returns {Promise<string|null>}
+ */
+export async function ocrImageWithModel(imagePath, { ocrModel = OCR_MODEL, ocrUrl, prompt = 'Free OCR.' } = {}) {
+  if (!ocrModel || !fs.existsSync(imagePath)) return null;
+  const endpoint = getOllamaUrl(ocrUrl);
+  const imageBase64 = fs.readFileSync(imagePath).toString('base64');
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(OCR_TIMEOUT_MS),
+    body: JSON.stringify({
+      model: ocrModel,
+      stream: false,
+      options: { num_predict: 4096 },
+      messages: [{
+        role: 'user',
+        content: prompt,
+        images: [imageBase64]
+      }]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`OCR API error (${response.status}) from ${endpoint}`);
+  }
+
+  const data = await response.json();
+  const raw = (data.message?.content || data.response || '').trim();
+  return formatOcrModelOutput(raw);
+}
+
+// OCR one or more images. If a neural OCR model (e.g. Baidu Unlimited OCR
+// via Ollama) is configured, it is used first; on failure or if unconfigured,
+// falls back to tesseract.js.
+// Returns one entry per input image ('' when nothing was recognized) to keep page alignment.
+export async function ocrImages(imagePaths, ocrLang = 'eng+fra', { ocrModel = OCR_MODEL, ocrUrl } = {}) {
+  if (ocrModel) {
+    try {
+      const parts = [];
+      let successCount = 0;
+      for (const imagePath of imagePaths) {
+        const text = await ocrImageWithModel(imagePath, { ocrModel, ocrUrl });
+        if (text !== null) {
+          parts.push(text.trim());
+          if (text.trim()) successCount++;
+        } else {
+          parts.push('');
+        }
+      }
+      if (successCount > 0 || imagePaths.length === 0) {
+        return parts;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Neural OCR model (${ocrModel}) failed, falling back to Tesseract:`, err.message);
+    }
+  }
+
   fs.mkdirSync(TESSDATA_DIR, { recursive: true });
   const worker = await createWorker(ocrLang, 1, { cachePath: TESSDATA_DIR });
   try {
@@ -607,10 +715,13 @@ export async function extractTextFromFile(filePath, { ocrEnabled = false, ocrLan
 export function writeExtractedTextFile(filePath, text, kind) {
   if (!text || !text.trim()) return null;
   const outPath = `${filePath}.txt`;
-  const viaOcr = kind === 'pdf-ocr' || kind === 'pdf-ocr+vision' || kind === 'ocr';
+  const viaOcr = kind === 'pdf-ocr' || kind === 'pdf-ocr+vision' || kind === 'ocr' || kind.startsWith('ocr-') || kind.startsWith('pdf-ocr');
+  const methodDesc = (OCR_MODEL && viaOcr)
+    ? `OCR model ${OCR_MODEL} (${kind})`
+    : (viaOcr ? `OCR tesseract (${kind})` : kind);
   const header = [
     `# Extracted text from ${path.basename(filePath)}`,
-    `# Method: ${viaOcr ? `OCR tesseract (${kind})` : kind}`,
+    `# Method: ${methodDesc}`,
     `# Characters: ${text.length}`,
     '',
   ].join('\n');

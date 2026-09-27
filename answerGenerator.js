@@ -5,22 +5,22 @@ import { searchMemory } from './memorySearch.js';
 
 dotenv.config();
 
-const llmUrl = process.env.LLM_URL || "http://localhost:11434/api/chat";
-const llmModel = process.env.LLM_MODEL || "qwen2:7b";
-const llmType = process.env.LLM_TYPE || "ollama"; // 'ollama' or 'openai' (for llama.cpp)
-
 export async function queryLLM(context, query) {
+  const currentLlmUrl = process.env.LLM_URL || "http://localhost:11434/api/chat";
+  const currentLlmModel = process.env.LLM_MODEL || "qwen2:7b";
+  const currentLlmType = process.env.LLM_TYPE || "ollama"; // 'ollama' or 'openai' (for llama.cpp)
+
   // Strict grounding: retrieval over OCR'd documents carries noisy fragments
   // (stock tables, garbled pages) — the model must answer from clean passages
   // only and admit when the answer is absent, in the question's language.
   const systemPrompt = "You are a helpful assistant. Answer the user's question using ONLY the information in the context below. Ignore noisy or garbled fragments (tables, OCR artifacts). If the answer is not in the context, say that you don't know. Reply in the language of the question. Context:\n" + context;
   
   let payload;
-  let url = llmUrl;
+  let url = currentLlmUrl;
 
-  if (llmType === "openai") {
+  if (currentLlmType === "openai") {
     payload = {
-      model: llmModel,
+      model: currentLlmModel,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: query }
@@ -61,7 +61,7 @@ export async function queryLLM(context, query) {
 
     const data = await response.json();
     
-    if (llmType === "openai") {
+    if (currentLlmType === "openai") {
         return data.choices?.[0]?.message?.content || "⚠️ No reply generated.";
     } else {
         return data.message?.content || "⚠️ No reply generated.";

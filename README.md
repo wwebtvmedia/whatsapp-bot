@@ -62,7 +62,8 @@ API_TOKEN=YOUR_SECRET_TOKEN_HERE
 | Variable | Default | Effect |
 | :--- | :--- | :--- |
 | `MEDIA_INDEXING` | `true` | Extract and index the text of received PDF/docx/text files. |
-| `MEDIA_OCR_ENABLED` | `true` | OCR received images (tesseract, `eng+fra`; downloads language data on first use). |
+| `MEDIA_OCR_ENABLED` | `true` | OCR received images (neural OCR if `MEDIA_OCR_MODEL` is configured, or tesseract `eng+fra`). |
+| `MEDIA_OCR_MODEL` | *(empty)* | Neural OCR model via Ollama (e.g. Baidu Unlimited OCR `frob/unlimited-ocr:latest`) for high-accuracy, layout-aware document extraction. Falls back to tesseract.js if unconfigured or offline. |
 | `MEDIA_PDF_OCR_PAGES` / `MEDIA_PDF_OCR_DPI` | `30` / `300` | Scanned PDFs (image pages — magazines…) run a **two-pass OCR**: a cheap low-DPI pass (`MEDIA_PDF_PREVIEW_DPI`, 100) classifies every page, only text pages (≥ `MEDIA_PDF_TEXT_WORDS` words, 20) get full-resolution OCR. The OCR output is **layout-aware**: columns are read column-by-column (headlines first) so articles come out readable, and garbage lines are dropped. |
 | `MEDIA_VISION_MODEL` | *(empty)* | Ollama vision model (e.g. `vision:latest`) that describes the picture pages of scanned PDFs instead of OCR-ing them — one line per page in the index. |
 | `MEDIA_MAX_CHUNKS` | `200` | Cap on indexed chunks per document (~180 pages; the extracted text is always fully kept in the `.txt` sidecar). |

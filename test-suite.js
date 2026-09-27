@@ -9,7 +9,7 @@ import { queryLLM } from './answerGenerator.js';
 import sharp from 'sharp';
 import { proto } from '@whiskeysockets/baileys';
 import { parseNewsletterFetchResult } from './connection/whatsapp.js';
-import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc, docMasthead, buildDocManifest, detectLanguage } from './mediaText.js';
+import { chunkText, writeExtractedTextFile, classifyPages, countRealWords, cleanOcrText, formatParagraphs, findColumnCuts, parseTocEntries, allocateChunkBudget, splitPdfByToc, docMasthead, buildDocManifest, detectLanguage, formatOcrModelOutput, ocrImageWithModel } from './mediaText.js';
 import {
   initDatabase,
   closeDatabase,
@@ -525,4 +525,28 @@ test('buildDocManifest: identity card with masthead, head of text and sommaire',
   const bare = buildDocManifest('doc.pdf', null, text, null, null);
   assert.ok(bare.includes('[Document doc.pdf]') && bare.includes('cover body'));
   assert.strictEqual(buildDocManifest('doc.pdf', null, '', null, null).trim(), '[Document doc.pdf]');
+});
+
+test('formatOcrModelOutput: parses DeepSeek-OCR / Baidu Unlimited OCR bounding boxes and layout tags', () => {
+  const raw = [
+    'title [47, 79, 522, 176]Rapport Annuel 2026',
+    'text [44, 246, 913, 316]Ce document présente les résultats financiers.',
+    'header [45, 542, 485, 622]Perspectives et Objectifs',
+    'list [44, 672, 970, 738]Expansion internationale',
+    '[10, 20, 30, 40]Plain line without tag',
+    'Regular ungrounded line'
+  ].join('\n');
+
+  const formatted = formatOcrModelOutput(raw);
+  assert.strictEqual(
+    formatted,
+    '# Rapport Annuel 2026\nCe document présente les résultats financiers.\n## Perspectives et Objectifs\n- Expansion internationale\nPlain line without tag\nRegular ungrounded line'
+  );
+  assert.strictEqual(formatOcrModelOutput(''), '');
+  assert.strictEqual(formatOcrModelOutput(null), '');
+});
+
+test('ocrImageWithModel: gracefully returns null when no model configured or missing file', async () => {
+  assert.strictEqual(await ocrImageWithModel('/nonexistent/path.png', { ocrModel: '' }), null);
+  assert.strictEqual(await ocrImageWithModel('/nonexistent/path.png', { ocrModel: 'frob/unlimited-ocr:latest' }), null);
 });

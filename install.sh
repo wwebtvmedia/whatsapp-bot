@@ -224,6 +224,9 @@ else
     echo "✔️  Remote Ollama found at $OLLAMA_REMOTE — using '$REMOTE_MODEL'"
     set_llm_env "$OLLAMA_REMOTE/api/chat" ollama "$REMOTE_MODEL"
     USE_LOCAL_LLM=0
+    if echo "$REMOTE_TAGS" | grep -qF "unlimited-ocr"; then
+      echo "✔️  Neural OCR model available on remote: frob/unlimited-ocr:latest"
+    fi
   elif [ -n "$REMOTE_TAGS" ]; then
     echo "${YEL}⚠️  Ollama reachable at $OLLAMA_REMOTE but '$REMOTE_MODEL' is missing.${NC}"
     # grep -o parsing: the old cut -d'"' -f4 picked the wrong field and
