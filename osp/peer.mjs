@@ -108,13 +108,15 @@ async function translateText(text, targetLang) {
  * gemma abstain on a third of draws even with the title in chunk #1. Without
  * a manifest anchor, the best hit's document mates stay (content queries). */
 export function focusDocument(ranked, docOf) {
-  const anchor = ranked.find(t => t.startsWith('[Document ')) || ranked[0];
+  if (!ranked || !ranked.length) return [];
+  const anchor = ranked.find(t => t && t.startsWith('[Document ')) || ranked[0];
+  if (!anchor) return [];
   if (anchor.startsWith('[Document ')) {
-    return ranked.filter(t => t.startsWith('[Document '));
+    return ranked.filter(t => t && t.startsWith('[Document '));
   }
-  const bestDoc = docOf.get(anchor);
+  const bestDoc = docOf?.get(anchor);
   if (!bestDoc) return ranked;
-  return ranked.filter(t => docOf.get(t) === bestDoc || t.startsWith('[Document '));
+  return ranked.filter(t => (docOf && docOf.get(t) === bestDoc) || (t && t.startsWith('[Document ')));
 }
 
 /** Pull this bot's own memory for a query: documents first, then chats.
@@ -534,7 +536,7 @@ export async function buildOspRouter(auth) {
     }
     try {
       const candidates = Object.keys(p.remotes);
-      const out = await p.origin.query(query, Number(tier) || 1,
+      const out = await p.origin.query(query, Number(tier ?? 1),
         candidates.length ? { candidates } : {});
       p.lastOutcome = out;
       res.json(out);
